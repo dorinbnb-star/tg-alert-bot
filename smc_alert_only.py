@@ -25,28 +25,17 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-COINGECKO_BASE_URL = "https://api.coingecko.com/api/v3"
+BINANCE_BASE_URL = "https://api.binance.com"
 
 MIN_RR = 1.8
 SCAN_INTERVAL = 300
 COOLDOWN_HOURS = 4
-OHLC_DELAY = 8
+OHLC_DELAY = 2
 
 WATCHLIST = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "UNIUSDT",
     "AAVEUSDT", "TIAUSDT", "WLDUSDT", "WIFUSDT"
 ]
-
-COIN_MAP = {
-    "BTCUSDT": "bitcoin",
-    "ETHUSDT": "ethereum",
-    "SOLUSDT": "solana",
-    "UNIUSDT": "uniswap",
-    "AAVEUSDT": "aave",
-    "TIAUSDT": "celestia",
-    "WLDUSDT": "worldcoin-wld",
-    "WIFUSDT": "dogwifcoin"
-}
 
 sent_setups = {}
 
@@ -71,36 +60,32 @@ def send_telegram(message: str):
 
 
 # ─────────────────────────────────────────────
-# DATE DE PIATA — COINGECKO
+# DATE DE PIATA — BINANCE PUBLIC
 # ─────────────────────────────────────────────
 
 def get_all_prices() -> dict:
-    ids = ",".join(COIN_MAP.values())
     try:
         r = requests.get(
-            f"{COINGECKO_BASE_URL}/simple/price",
-            params={
-                "ids": ids,
-                "vs_currencies": "usd",
-                "include_24hr_change": "true"
-            },
+            f"{BINANCE_BASE_URL}/api/v3/ticker/24hr",
             timeout=15
         )
         r.raise_for_status()
-        return r.json()
+        tickers = r.json()
+        return {t["symbol"]: t for t in tickers}
     except Exception as e:
-        logger.error(f"Eroare preturi: {e}")
+        logger.error(f"Eroare preturi Binance: {e}")
         return {}
 
 
 def get_ohlc_data(symbol: str):
-    coin_id = COIN_MAP.get(symbol)
-    if not coin_id:
-        return []
     try:
         r = requests.get(
-            f"{COINGECKO_BASE_URL}/coins/{coin_id}/ohlc",
-            params={"vs_currency": "usd", "days": "14"},
+            f"{BINANCE_BASE_URL}/api/v3/klines",
+            params={
+                "symbol": symbol,
+                "interval": "4h",
+                "limit": 100
+            },
             timeout=20
         )
         r.raise_for_status()
@@ -114,7 +99,7 @@ def get_ohlc_data(symbol: str):
                     float(candle[2]),
                     float(candle[3]),
                     float(candle[4]),
-                    0.0
+                    float(candle[5]),
                 ])
             except (ValueError, IndexError):
                 continue
@@ -304,7 +289,7 @@ def analyze_coin(symbol: str, price: float):
 def format_alert(setup: dict) -> str:
     emoji = "🔴" if setup["direction"] == "SHORT" else "🟢"
     zone_emoji = "🏔" if setup["zone"] == "Premium" else "🏕"
-    patterns_str = " | ".join(setup["patterns"])
+        patterns_str = " | ".join(setup["patterns"])
 
     return (
         f"{emoji} *SETUP SMC — {setup['symbol']}/USDT*\n"
@@ -338,10 +323,9 @@ def scan_watchlist():
 
     logger.info(f"Scanare watchlist: {len(WATCHLIST)} perechi")
 
-    # Un singur request pentru toate preturile
     all_prices = get_all_prices()
     if not all_prices:
-        logger.error("Nu am putut obtine preturi.")
+        logger.error("Nu am putut obtine preturi Binance.")
         return
 
     setups = []
@@ -351,8 +335,12 @@ def scan_watchlist():
             logger.info(f"  {base} — cooldown activ, skip")
             continue
 
-        coin_id = COIN_MAP.get(symbol)
-        price = float(all_prices.get(coin_id, {}).get("usd", 0))
+        ticker = all_prices.get(symbol, {})
+        try:
+            price = float(ticker.get("lastPrice", 0))
+        except (ValueError, TypeError):
+            price = 0
+
         if not price:
             logger.info(f"  — {base}: pret indisponibil")
             continue
