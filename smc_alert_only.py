@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-BYBIT_BASE_URL = "https://api-demo.bybit.com"
+BYBIT_BASE_URL = "https://api.bybit.com"
 
 MIN_RR = 2.0
 SCAN_INTERVAL = 300       # 5 minute
