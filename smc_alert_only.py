@@ -5,7 +5,6 @@ Gaseste setup, trimite alerta TG, tu decizi.
 
 import os
 import time
-import json
 import requests
 import logging
 from datetime import datetime, timedelta
@@ -26,19 +25,28 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-BYBIT_BASE_URL = "https://api.bybit.com"
+COINGECKO_BASE_URL = "https://api.coingecko.com/api/v3"
 
-MIN_RR = 2.0
-SCAN_INTERVAL = 300       # 5 minute
+MIN_RR = 1.8
+SCAN_INTERVAL = 300
 COOLDOWN_HOURS = 4
 OHLC_DELAY = 3
-MAX_CANDIDATES = 8
 
-# Watchlist fix — monedele tale
 WATCHLIST = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "UNIUSDT",
     "AAVEUSDT", "TIAUSDT", "WLDUSDT", "WIFUSDT"
 ]
+
+COIN_MAP = {
+    "BTCUSDT": "bitcoin",
+    "ETHUSDT": "ethereum",
+    "SOLUSDT": "solana",
+    "UNIUSDT": "uniswap",
+    "AAVEUSDT": "aave",
+    "TIAUSDT": "celestia",
+    "WLDUSDT": "worldcoin-wld",
+    "WIFUSDT": "dogwifcoin"
+}
 
 sent_setups = {}
 
@@ -63,30 +71,49 @@ def send_telegram(message: str):
 
 
 # ─────────────────────────────────────────────
-# DATE DE PIATA
+# DATE DE PIATA — COINGECKO
 # ─────────────────────────────────────────────
 
 def get_ticker(symbol: str) -> dict:
-    url = f"{BYBIT_BASE_URL}/v5/market/tickers"
+    coin_id = COIN_MAP.get(symbol)
+    if not coin_id:
+        return {}
     try:
-        r = requests.get(url, params={"category": "linear", "symbol": symbol}, timeout=10)
+        r = requests.get(
+            f"{COINGECKO_BASE_URL}/simple/price",
+            params={
+                "ids": coin_id,
+                "vs_currencies": "usd",
+                "include_24hr_change": "true",
+                "include_24hr_vol": "true"
+            },
+            timeout=10
+        )
         r.raise_for_status()
-        items = r.json().get("result", {}).get("list", [])
-        return items[0] if items else {}
+        data = r.json().get(coin_id, {})
+        return {
+            "lastPrice": str(data.get("usd", 0)),
+            "price24hPcnt": str(data.get("usd_24h_change", 0) / 100),
+        }
     except Exception as e:
         logger.error(f"Eroare ticker {symbol}: {e}")
         return {}
 
 
 def get_ohlc_data(symbol: str):
-    url = f"{BYBIT_BASE_URL}/v5/market/kline"
-    params = {"category": "linear", "symbol": symbol, "interval": "240", "limit": 100}
+    coin_id = COIN_MAP.get(symbol)
+    if not coin_id:
+        return []
     try:
-        r = requests.get(url, params=params, timeout=20)
+        r = requests.get(
+            f"{COINGECKO_BASE_URL}/coins/{coin_id}/ohlc",
+            params={"vs_currency": "usd", "days": "14"},
+            timeout=20
+        )
         r.raise_for_status()
-        raw = r.json().get("result", {}).get("list", [])
+        raw = r.json()
         ohlc = []
-        for candle in reversed(raw):
+        for candle in raw:
             try:
                 ohlc.append([
                     int(candle[0]),
@@ -94,13 +121,13 @@ def get_ohlc_data(symbol: str):
                     float(candle[2]),
                     float(candle[3]),
                     float(candle[4]),
-                    float(candle[5]),
+                    0.0
                 ])
             except (ValueError, IndexError):
                 continue
         return ohlc
     except Exception as e:
-        logger.error(f"Eroare kline {symbol}: {e}")
+        logger.error(f"Eroare ohlc {symbol}: {e}")
         return []
 
 
@@ -212,8 +239,8 @@ def analyze_coin(symbol: str):
         return None
 
     pct = (price - ema50) / ema50 * 100
-    is_premium = pct > 2
-    is_discount = pct < -2
+    is_premium = pct > 1.5
+    is_discount = pct < -1.5
 
     if not (is_premium or is_discount):
         return None
@@ -262,7 +289,7 @@ def analyze_coin(symbol: str):
         score += 10
         patterns.append(f"RSI {rsi:.0f} oversold")
 
-    if score < 55:
+    if score < 45:
         return None
 
     return {
@@ -318,8 +345,6 @@ def scan_watchlist():
     global sent_setups
 
     now = datetime.utcnow()
-
-    # curata cooldown expirat
     expired = [s for s, t in sent_setups.items() if now - t > timedelta(hours=COOLDOWN_HOURS)]
     for s in expired:
         del sent_setups[s]
@@ -337,7 +362,7 @@ def scan_watchlist():
         result = analyze_coin(symbol)
         if result:
             setups.append(result)
-            logger.info(f"  ✅ Setup gasit: {base} {result['direction']} score={result['score']}")
+            logger.info(f"  Setup gasit: {base} {result['direction']} score={result['score']}")
         else:
             logger.info(f"  — {base}: niciun setup SMC valid")
 
@@ -347,11 +372,8 @@ def scan_watchlist():
         logger.info("Niciun setup SMC valid in watchlist.")
         return
 
-    # sorteaza dupa scor, trimite top 2
     setups.sort(key=lambda x: x["score"], reverse=True)
-    top = setups[:2]
-
-    for setup in top:
+    for setup in setups[:2]:
         msg = format_alert(setup)
         send_telegram(msg)
         sent_setups[setup["symbol"]] = now
