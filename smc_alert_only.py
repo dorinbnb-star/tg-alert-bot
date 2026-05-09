@@ -40,10 +40,6 @@ WATCHLIST = [
 sent_setups = {}
 
 
-# ─────────────────────────────────────────────
-# TELEGRAM
-# ─────────────────────────────────────────────
-
 def send_telegram(message: str):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         logger.warning("Telegram credentials lipsa.")
@@ -58,10 +54,6 @@ def send_telegram(message: str):
     except Exception as e:
         logger.error(f"Eroare Telegram: {e}")
 
-
-# ─────────────────────────────────────────────
-# DATE DE PIATA — BINANCE PUBLIC
-# ─────────────────────────────────────────────
 
 def get_all_prices() -> dict:
     try:
@@ -108,10 +100,6 @@ def get_ohlc_data(symbol: str):
         logger.error(f"Eroare ohlc {symbol}: {e}")
         return []
 
-
-# ─────────────────────────────────────────────
-# CALCULE SMC
-# ─────────────────────────────────────────────
 
 def calculate_ema(prices, period):
     if len(prices) < period:
@@ -185,10 +173,6 @@ def detect_bos(ohlc):
         return {"found": True, "type": "BOS_BEARISH"}
     return {"found": False}
 
-
-# ─────────────────────────────────────────────
-# ANALIZA COIN
-# ─────────────────────────────────────────────
 
 def analyze_coin(symbol: str, price: float):
     if not price:
@@ -282,14 +266,10 @@ def analyze_coin(symbol: str, price: float):
     }
 
 
-# ─────────────────────────────────────────────
-# FORMAT ALERTA TG
-# ─────────────────────────────────────────────
-
 def format_alert(setup: dict) -> str:
     emoji = "🔴" if setup["direction"] == "SHORT" else "🟢"
     zone_emoji = "🏔" if setup["zone"] == "Premium" else "🏕"
-        patterns_str = " | ".join(setup["patterns"])
+    patterns_str = " | ".join(setup["patterns"])
 
     return (
         f"{emoji} *SETUP SMC — {setup['symbol']}/USDT*\n"
@@ -308,10 +288,6 @@ def format_alert(setup: dict) -> str:
         f"⚠️ _Doar alertă — decizi tu intrarea_"
     )
 
-
-# ─────────────────────────────────────────────
-# SCANNER PRINCIPAL
-# ─────────────────────────────────────────────
 
 def scan_watchlist():
     global sent_setups
@@ -367,10 +343,6 @@ def scan_watchlist():
         logger.info(f"Alerta trimisa: {setup['symbol']} {setup['direction']}")
         time.sleep(1)
 
-
-# ─────────────────────────────────────────────
-# MAIN
-# ─────────────────────────────────────────────
 
 def main():
     logger.info("SMC Alert System pornit — fara executie automata.")
