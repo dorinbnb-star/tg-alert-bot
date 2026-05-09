@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-BINANCE_BASE_URL = "https://api.binance.com"
+BINANCE_BASE_URL = "https://www.okx.com"
 
 MIN_RR = 1.8
 SCAN_INTERVAL = 300
