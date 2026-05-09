@@ -30,7 +30,7 @@ COINGECKO_BASE_URL = "https://api.coingecko.com/api/v3"
 MIN_RR = 1.8
 SCAN_INTERVAL = 300
 COOLDOWN_HOURS = 4
-OHLC_DELAY = 3
+OHLC_DELAY = 8
 
 WATCHLIST = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "UNIUSDT",
@@ -74,29 +74,22 @@ def send_telegram(message: str):
 # DATE DE PIATA — COINGECKO
 # ─────────────────────────────────────────────
 
-def get_ticker(symbol: str) -> dict:
-    coin_id = COIN_MAP.get(symbol)
-    if not coin_id:
-        return {}
+def get_all_prices() -> dict:
+    ids = ",".join(COIN_MAP.values())
     try:
         r = requests.get(
             f"{COINGECKO_BASE_URL}/simple/price",
             params={
-                "ids": coin_id,
+                "ids": ids,
                 "vs_currencies": "usd",
-                "include_24hr_change": "true",
-                "include_24hr_vol": "true"
+                "include_24hr_change": "true"
             },
-            timeout=10
+            timeout=15
         )
         r.raise_for_status()
-        data = r.json().get(coin_id, {})
-        return {
-            "lastPrice": str(data.get("usd", 0)),
-            "price24hPcnt": str(data.get("usd_24h_change", 0) / 100),
-        }
+        return r.json()
     except Exception as e:
-        logger.error(f"Eroare ticker {symbol}: {e}")
+        logger.error(f"Eroare preturi: {e}")
         return {}
 
 
@@ -212,12 +205,7 @@ def detect_bos(ohlc):
 # ANALIZA COIN
 # ─────────────────────────────────────────────
 
-def analyze_coin(symbol: str):
-    ticker = get_ticker(symbol)
-    try:
-        price = float(ticker.get("lastPrice", 0))
-    except (ValueError, TypeError):
-        return None
+def analyze_coin(symbol: str, price: float):
     if not price:
         return None
 
@@ -294,7 +282,6 @@ def analyze_coin(symbol: str):
 
     return {
         "symbol": symbol.replace("USDT", ""),
-        "full_symbol": symbol,
         "price": price,
         "direction": direction,
         "zone": "Premium" if is_premium else "Discount",
@@ -351,6 +338,12 @@ def scan_watchlist():
 
     logger.info(f"Scanare watchlist: {len(WATCHLIST)} perechi")
 
+    # Un singur request pentru toate preturile
+    all_prices = get_all_prices()
+    if not all_prices:
+        logger.error("Nu am putut obtine preturi.")
+        return
+
     setups = []
     for symbol in WATCHLIST:
         base = symbol.replace("USDT", "")
@@ -358,8 +351,14 @@ def scan_watchlist():
             logger.info(f"  {base} — cooldown activ, skip")
             continue
 
-        logger.info(f"  Analizez {symbol}...")
-        result = analyze_coin(symbol)
+        coin_id = COIN_MAP.get(symbol)
+        price = float(all_prices.get(coin_id, {}).get("usd", 0))
+        if not price:
+            logger.info(f"  — {base}: pret indisponibil")
+            continue
+
+        logger.info(f"  Analizez {symbol} @ ${price:,.4f}...")
+        result = analyze_coin(symbol, price)
         if result:
             setups.append(result)
             logger.info(f"  Setup gasit: {base} {result['direction']} score={result['score']}")
