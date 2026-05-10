@@ -25,8 +25,6 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-BINANCE_BASE_URL = "https://www.okx.com"
-
 MIN_RR = 1.8
 SCAN_INTERVAL = 300
 COOLDOWN_HOURS = 4
@@ -37,7 +35,22 @@ WATCHLIST = [
     "AAVEUSDT", "TIAUSDT", "WLDUSDT", "WIFUSDT"
 ]
 
+KILLZONES = [
+    (7, 0, 10, 0),
+    (13, 0, 16, 0),
+]
+
 sent_setups = {}
+
+
+def in_killzone() -> bool:
+    now_utc = datetime.utcnow()
+    for start_h, start_m, end_h, end_m in KILLZONES:
+        start = now_utc.replace(hour=start_h, minute=start_m, second=0, microsecond=0)
+        end = now_utc.replace(hour=end_h, minute=end_m, second=0, microsecond=0)
+        if start <= now_utc <= end:
+            return True
+    return False
 
 
 def send_telegram(message: str):
@@ -58,32 +71,34 @@ def send_telegram(message: str):
 def get_all_prices() -> dict:
     try:
         r = requests.get(
-            f"{BINANCE_BASE_URL}/api/v3/ticker/24hr",
+            "https://www.okx.com/api/v5/market/tickers",
+            params={"instType": "SPOT"},
             timeout=15
         )
         r.raise_for_status()
-        tickers = r.json()
-        return {t["symbol"]: t for t in tickers}
+        tickers = r.json().get("data", [])
+        result = {}
+        for t in tickers:
+            sym = t.get("instId", "").replace("-", "")
+            result[sym] = {"lastPrice": t.get("last", 0)}
+        return result
     except Exception as e:
-        logger.error(f"Eroare preturi Binance: {e}")
+        logger.error(f"Eroare preturi OKX: {e}")
         return {}
 
 
 def get_ohlc_data(symbol: str):
+    inst_id = symbol[:-4] + "-" + symbol[-4:]
     try:
         r = requests.get(
-            f"{BINANCE_BASE_URL}/api/v3/klines",
-            params={
-                "symbol": symbol,
-                "interval": "4h",
-                "limit": 100
-            },
+            "https://www.okx.com/api/v5/market/candles",
+            params={"instId": inst_id, "bar": "4H", "limit": "100"},
             timeout=20
         )
         r.raise_for_status()
-        raw = r.json()
+        raw = r.json().get("data", [])
         ohlc = []
-        for candle in raw:
+        for candle in reversed(raw):
             try:
                 ohlc.append([
                     int(candle[0]),
@@ -297,11 +312,15 @@ def scan_watchlist():
     for s in expired:
         del sent_setups[s]
 
-    logger.info(f"Scanare watchlist: {len(WATCHLIST)} perechi")
+    if not in_killzone():
+        logger.info("In afara killzone — skip scanare.")
+        return
+
+    logger.info(f"KILLZONE ACTIVA — Scanare watchlist: {len(WATCHLIST)} perechi")
 
     all_prices = get_all_prices()
     if not all_prices:
-        logger.error("Nu am putut obtine preturi Binance.")
+        logger.error("Nu am putut obtine preturi OKX.")
         return
 
     setups = []
@@ -347,11 +366,13 @@ def scan_watchlist():
 def main():
     logger.info("SMC Alert System pornit — fara executie automata.")
     logger.info(f"Watchlist: {', '.join(WATCHLIST)}")
-    logger.info(f"Scanare la fiecare {SCAN_INTERVAL//60} minute | Cooldown {COOLDOWN_HOURS}h per simbol")
+    logger.info(f"Scanare la fiecare {SCAN_INTERVAL//60} minute | Killzones: London 07-10 UTC, NY 13-16 UTC")
 
     send_telegram(
         "🤖 *SMC Alert System pornit*\n"
-        f"Scanez {len(WATCHLIST)} perechi la fiecare {SCAN_INTERVAL//60} min.\n"
+        f"Scanez {len(WATCHLIST)} perechi in killzones.\n"
+        "London: 07:00-10:00 UTC\n"
+        "NY AM: 13:00-16:00 UTC\n"
         "Vei primi alerta cand gasesc setup SMC valid."
     )
 
