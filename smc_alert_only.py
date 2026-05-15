@@ -1,6 +1,7 @@
 """
 SMC Alert System — Scanner fara executie automata
 Gaseste setup, trimite alerta TG, tu decizi.
+Versiune: 2.0 — scanare continua 24/7
 """
 
 import os
@@ -254,6 +255,9 @@ def analyze_coin(symbol: str, price: float):
     if bos.get("found"):
         score += 25
         patterns.append(f"BOS {bos.get('type')}")
+    if in_killzone():
+        score += 10
+        patterns.append("Killzone activa")
     if direction == "SHORT" and rsi > 65:
         score += 10
         patterns.append(f"RSI {rsi:.0f} overbought")
@@ -312,11 +316,8 @@ def scan_watchlist():
     for s in expired:
         del sent_setups[s]
 
-    if not in_killzone():
-        logger.info("In afara killzone — skip scanare.")
-        return
-
-    logger.info(f"KILLZONE ACTIVA — Scanare watchlist: {len(WATCHLIST)} perechi")
+    kz_status = "KILLZONE ACTIVA" if in_killzone() else "Afara killzone"
+    logger.info(f"{kz_status} — Scanare watchlist: {len(WATCHLIST)} perechi")
 
     all_prices = get_all_prices()
     if not all_prices:
@@ -364,13 +365,14 @@ def scan_watchlist():
 
 
 def main():
-    logger.info("SMC Alert System pornit — fara executie automata.")
+    logger.info("SMC Alert System v2.0 pornit — scanare continua 24/7.")
     logger.info(f"Watchlist: {', '.join(WATCHLIST)}")
-    logger.info(f"Scanare la fiecare {SCAN_INTERVAL//60} minute | Killzones: London 07-10 UTC, NY 13-16 UTC")
+    logger.info(f"Scanare la fiecare {SCAN_INTERVAL//60} minute | Killzone = bonus score")
 
     send_telegram(
-        "🤖 *SMC Alert System pornit*\n"
-        f"Scanez {len(WATCHLIST)} perechi in killzones.\n"
+        "🤖 *SMC Alert System v2.0 pornit*\n"
+        f"Scanez {len(WATCHLIST)} perechi continuu 24/7\n"
+        "Killzone = bonus score la setup-uri\n"
         "London: 07:00-10:00 UTC\n"
         "NY AM: 13:00-16:00 UTC\n"
         "Vei primi alerta cand gasesc setup SMC valid."
