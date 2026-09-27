@@ -1,0 +1,18 @@
+{
+  "rules_version": "v0.1",
+  "status": "experimental",
+  "instrument": "BTCUSDT",
+  "timeframes": {"context": "4H", "structure": "1H", "trigger": "15m"},
+  "setup": "sweep_reentry_confirmation",
+  "reference_pivot_closed_candles_each_side": 2,
+  "min_sweep_percent": 0.05,
+  "max_sweep_percent": 0.75,
+  "reentry_window_15m_candles": 4,
+  "confirmation_window_15m_candles": 2,
+  "entry_window_15m_candles": 4,
+  "invalidation_buffer_percent": 0.10,
+  "minimum_rr_for_enter": 1.8,
+  "active_expiry_15m_candles": 16,
+  "probability_label": "NECALIBRATA",
+  "notes": "Valorile numerice sunt ipoteze configurabile, nu avantaj demonstrat."
+}
