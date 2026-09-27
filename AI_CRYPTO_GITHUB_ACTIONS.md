@@ -9,6 +9,7 @@ Workflow-ul accepta numai rulare manuala `workflow_dispatch`, in dry-run. Blocul
 Scannerul:
 
 - foloseste endpointurile publice Bybit, fara API key;
+- foloseste implicit `https://api-demo.bybit.com`; domeniul poate fi schimbat prin `BYBIT_BASE_URL`;
 - porneste cu `BTCUSDT`, configurabil in `ai_crypto_monitor/config-v0.1.json` la `symbols`;
 - foloseste context 4H, structura 1H si ultima lumanare 15m inchisa pentru trigger;
 - cere sweep, revenire, confirmare, Entry, SL structural, TP structural si R:R minim;
