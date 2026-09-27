@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 import unittest
@@ -145,6 +146,27 @@ class EntryMonitorTests(unittest.TestCase):
         with patch("urllib.request.urlopen", side_effect=network_error):
             with self.assertRaisesRegex(monitor.MonitorError, "Eroare retea"):
                 monitor.http_json("https://api.bybit.com/v5/market/time")
+
+    def test_bybit_base_url_and_public_candle_intervals_are_configurable(self) -> None:
+        empty_klines = {"retCode": 0, "result": {"list": []}}
+        with patch.dict(os.environ, {"BYBIT_BASE_URL": ""}):
+            self.assertEqual("https://api-demo.bybit.com", monitor.BybitClient().base_url)
+
+        with patch.dict(os.environ, {"BYBIT_BASE_URL": "https://market.example/"}), patch.object(
+            monitor, "http_json", return_value=empty_klines,
+        ) as request:
+            client = monitor.BybitClient()
+            client.klines("BTCUSDT", "60", 160)
+            client.klines("BTCUSDT", "15", 160)
+
+        self.assertEqual(
+            ["https://market.example/v5/market/kline"] * 2,
+            [call.args[0] for call in request.call_args_list],
+        )
+        self.assertEqual(
+            ["60", "15"],
+            [call.kwargs["params"]["interval"] for call in request.call_args_list],
+        )
 
     def test_technical_message_is_one_shot(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

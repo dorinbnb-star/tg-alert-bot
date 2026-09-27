@@ -20,7 +20,7 @@ from typing import Callable
 
 
 LOGGER = logging.getLogger("entry-monitor")
-BYBIT_BASE = "https://api.bybit.com"
+DEFAULT_BYBIT_BASE_URL = "https://api-demo.bybit.com"
 TELEGRAM_BASE = "https://api.telegram.org"
 TECHNICAL_TEST_MESSAGE = (
     "TEST AI Crypto Trader: conexiunea Telegram functioneaza. "
@@ -156,16 +156,23 @@ def http_json(url: str, *, params: dict | None = None, method: str = "GET", time
     return payload
 
 
+def bybit_base_url() -> str:
+    return (os.getenv("BYBIT_BASE_URL") or DEFAULT_BYBIT_BASE_URL).rstrip("/")
+
+
 class BybitClient:
+    def __init__(self, base_url: str | None = None):
+        self.base_url = (base_url or bybit_base_url()).rstrip("/")
+
     def server_time_ms(self) -> int:
-        payload = http_json(f"{BYBIT_BASE}/v5/market/time")
+        payload = http_json(f"{self.base_url}/v5/market/time")
         if payload.get("retCode") != 0:
             raise MonitorError(f"Bybit time retCode={payload.get('retCode')}")
         return int(payload["result"]["timeNano"]) // 1_000_000
 
     def klines(self, symbol: str, interval: str, limit: int) -> list[Candle]:
         payload = http_json(
-            f"{BYBIT_BASE}/v5/market/kline",
+            f"{self.base_url}/v5/market/kline",
             params={"category": "linear", "symbol": symbol, "interval": interval, "limit": str(limit)},
         )
         if payload.get("retCode") != 0:
@@ -183,7 +190,7 @@ class BybitClient:
 
     def last_price(self, symbol: str) -> float:
         payload = http_json(
-            f"{BYBIT_BASE}/v5/market/tickers",
+            f"{self.base_url}/v5/market/tickers",
             params={"category": "linear", "symbol": symbol},
         )
         if payload.get("retCode") != 0:
