@@ -1,0 +1,20 @@
+{
+  "config_version": "v0.1",
+  "rules_version": "v0.1",
+  "exchange": "BYBIT",
+  "category": "linear",
+  "symbols": ["BTCUSDT"],
+  "expected_bot_username": "DorianTradingSignals_bot",
+  "intervals": {"context": "240", "structure": "60", "trigger": "15"},
+  "history_limits": {"context": 240, "structure": 160, "trigger": 160},
+  "minimum_closed_candles": {"context": 210, "structure": 60, "trigger": 40},
+  "maximum_age_seconds": {"context": 15000, "structure": 4500, "trigger": 1200},
+  "signal_lookback_15m_candles": 40,
+  "entry_valid_seconds": 300,
+  "maximum_entry_drift_percent": 0.15,
+  "scan_interval_seconds": 60,
+  "dedup_ttl_hours": 168,
+  "closed_candle_grace_seconds": 3,
+  "probability_label": "NECALIBRATA",
+  "notes": "Pragurile sunt ipoteze operationale configurabile, nu avantaj demonstrat."
+}
