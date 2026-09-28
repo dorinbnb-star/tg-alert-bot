@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Strict Bybit v0.1 entry monitor with gated Telegram delivery."""
+"""Strict OKX v0.1 entry monitor with gated Telegram delivery."""
 
 from __future__ import annotations
 
@@ -20,7 +20,9 @@ from typing import Callable
 
 
 LOGGER = logging.getLogger("entry-monitor")
-DEFAULT_BYBIT_BASE_URL = "https://api-demo.bybit.com"
+OKX_BASE_URL = "https://www.okx.com"
+OKX_BARS = {"15": "15m", "60": "1H", "240": "4H"}
+OKX_HEADERS = {"Accept": "application/json", "User-Agent": "ai-crypto-trader-diagnostic/1.0"}
 TELEGRAM_BASE = "https://api.telegram.org"
 TECHNICAL_TEST_MESSAGE = (
     "TEST AI Crypto Trader: conexiunea Telegram functioneaza. "
@@ -135,7 +137,16 @@ def credentials(env_file: Path | None) -> tuple[str, str]:
     return token, chat_id
 
 
-def http_json(url: str, *, params: dict | None = None, method: str = "GET", timeout: int = 15) -> dict:
+def http_json(
+    url: str,
+    *,
+    params: dict | None = None,
+    method: str = "GET",
+    timeout: int = 15,
+    headers: dict[str, str] | None = None,
+    endpoint: str | None = None,
+) -> dict:
+    # endpoint is a caller-supplied safe label; never derive it from url (Telegram urls carry the token).
     encoded = urllib.parse.urlencode(params or {}).encode("utf-8")
     request_url = url
     data = None
@@ -143,62 +154,83 @@ def http_json(url: str, *, params: dict | None = None, method: str = "GET", time
         request_url += "?" + encoded.decode("ascii")
     elif method == "POST":
         data = encoded
-    request = urllib.request.Request(request_url, data=data, method=method)
+    request = urllib.request.Request(request_url, data=data, method=method, headers=headers or {})
+    where = f" la {endpoint}" if endpoint else ""
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        raise MonitorError(f"HTTP {exc.code}") from None
+        raise MonitorError(f"HTTP {exc.code}{where}") from None
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-        raise MonitorError(f"Eroare retea: {type(exc).__name__}") from None
+        raise MonitorError(f"Eroare retea: {type(exc).__name__}{where}") from None
     if not isinstance(payload, dict):
-        raise MonitorError("Raspuns API invalid")
+        raise MonitorError(f"Raspuns API invalid{where}")
     return payload
 
 
-def bybit_base_url() -> str:
-    return (os.getenv("BYBIT_BASE_URL") or DEFAULT_BYBIT_BASE_URL).rstrip("/")
+def okx_data(payload: dict, label: str) -> list:
+    if payload.get("code") != "0":
+        raise MonitorError(f"OKX {label} code={payload.get('code', 'missing')}")
+    data = payload.get("data")
+    if not isinstance(data, list):
+        raise MonitorError(f"OKX {label}: data lipsa")
+    return data
 
 
-class BybitClient:
-    def __init__(self, base_url: str | None = None):
-        self.base_url = (base_url or bybit_base_url()).rstrip("/")
+def parse_okx_candles(rows: list, interval: str) -> list[Candle]:
+    """OKX rows are [ts, o, h, l, c, vol, volCcy, volCcyQuote, confirm], newest first."""
+    candles: list[Candle] = []
+    previous_start: int | None = None
+    for index, row in enumerate(rows):
+        if not isinstance(row, list) or len(row) < 9:
+            raise MonitorError(f"OKX {interval}: lumanarea {index} este incompleta")
+        try:
+            item = Candle(
+                start_ms=int(row[0]), open=float(row[1]), high=float(row[2]),
+                low=float(row[3]), close=float(row[4]), volume=float(row[5]),
+            )
+        except (TypeError, ValueError):
+            raise MonitorError(f"OKX {interval}: lumanarea {index} are date nenumerice") from None
+        if previous_start is not None and item.start_ms >= previous_start:
+            raise MonitorError(f"OKX {interval}: timestampurile nu sunt unice si descrescatoare")
+        previous_start = item.start_ms
+        if row[8] != "1":
+            continue
+        candles.append(item)
+    candles.reverse()
+    return candles
+
+
+class OkxClient:
+    def __init__(self, base_url: str = OKX_BASE_URL):
+        self.base_url = base_url.rstrip("/")
+
+    def _get(self, path: str, params: dict | None = None) -> dict:
+        return http_json(f"{self.base_url}{path}", params=params, headers=OKX_HEADERS, endpoint=path)
 
     def server_time_ms(self) -> int:
-        payload = http_json(f"{self.base_url}/v5/market/time")
-        if payload.get("retCode") != 0:
-            raise MonitorError(f"Bybit time retCode={payload.get('retCode')}")
-        return int(payload["result"]["timeNano"]) // 1_000_000
+        data = okx_data(self._get("/api/v5/public/time"), "time")
+        try:
+            return int(data[0]["ts"])
+        except (IndexError, KeyError, TypeError, ValueError):
+            raise MonitorError("OKX time incomplet") from None
 
     def klines(self, symbol: str, interval: str, limit: int) -> list[Candle]:
-        payload = http_json(
-            f"{self.base_url}/v5/market/kline",
-            params={"category": "linear", "symbol": symbol, "interval": interval, "limit": str(limit)},
+        if interval not in OKX_BARS:
+            raise MonitorError(f"Interval neacceptat: {interval}")
+        payload = self._get(
+            "/api/v5/market/candles",
+            {"instId": symbol, "bar": OKX_BARS[interval], "limit": str(limit)},
         )
-        if payload.get("retCode") != 0:
-            raise MonitorError(f"Bybit kline retCode={payload.get('retCode')}")
-        candles = []
-        for row in reversed(payload.get("result", {}).get("list", [])):
-            try:
-                candles.append(Candle(
-                    start_ms=int(row[0]), open=float(row[1]), high=float(row[2]),
-                    low=float(row[3]), close=float(row[4]), volume=float(row[5]),
-                ))
-            except (IndexError, TypeError, ValueError):
-                continue
-        return candles
+        return parse_okx_candles(okx_data(payload, f"candles {interval}"), interval)
 
     def last_price(self, symbol: str) -> float:
-        payload = http_json(
-            f"{self.base_url}/v5/market/tickers",
-            params={"category": "linear", "symbol": symbol},
-        )
-        if payload.get("retCode") != 0:
-            raise MonitorError(f"Bybit ticker retCode={payload.get('retCode')}")
+        payload = self._get("/api/v5/market/ticker", {"instId": symbol})
+        data = okx_data(payload, "ticker")
         try:
-            return float(payload["result"]["list"][0]["lastPrice"])
-        except (KeyError, IndexError, TypeError, ValueError) as exc:
-            raise MonitorError("Bybit ticker incomplet") from exc
+            return float(data[0]["last"])
+        except (IndexError, KeyError, TypeError, ValueError):
+            raise MonitorError("OKX ticker incomplet") from None
 
 
 def telegram_call(token: str, method: str, params: dict | None = None) -> dict:
@@ -482,7 +514,7 @@ def detect_entry(
     return None
 
 
-def fetch_closed_market(client: BybitClient, config: dict) -> tuple[int, dict[str, list[Candle]]]:
+def fetch_closed_market(client: OkxClient, config: dict) -> tuple[int, dict[str, list[Candle]]]:
     now_ms = client.server_time_ms()
     series: dict[str, list[Candle]] = {}
     for key in ("context", "structure", "trigger"):
@@ -498,7 +530,7 @@ def fetch_closed_market(client: BybitClient, config: dict) -> tuple[int, dict[st
     return now_ms, series
 
 
-def final_entry_check(client: BybitClient, signal: EntrySignal, config: dict) -> tuple[int, float]:
+def final_entry_check(client: OkxClient, signal: EntrySignal, config: dict) -> tuple[int, float]:
     now_ms = client.server_time_ms()
     if now_ms > signal.expires_at_ms:
         raise MonitorError("Semnal expirat inainte de trimitere")
@@ -524,13 +556,13 @@ def format_entry_alert(signal: EntrySignal, live_price: float) -> str:
         f"Expira: {utc_iso(signal.expires_at_ms)}\n"
         f"Scor confluenta: {signal.confluence_score}/100 (nu este probabilitate)\n"
         f"Probabilitate: {signal.probability}\n"
-        "Date: Bybit OHLC inchis 4H/1H/15m. Fara heatmap/OI/CVD. Decizie manuala."
+        "Date: OKX OHLC inchis 4H/1H/15m. Fara heatmap/OI/CVD. Decizie manuala."
     )
 
 
 def scan_symbol(
     root: Path,
-    client: BybitClient,
+    client: OkxClient,
     dry_run: bool,
     config: dict,
     rules: dict,
@@ -564,7 +596,7 @@ def scan_symbol(
 
 def scan_once(
     root: Path,
-    client: BybitClient,
+    client: OkxClient,
     dry_run: bool,
     sender: Callable[[str], None] | None = None,
 ) -> dict:
@@ -606,6 +638,33 @@ def write_github_outputs(result: dict) -> None:
     with Path(output_path).open("a", encoding="utf-8") as handle:
         handle.write(f"status={status}\n")
         handle.write(f"alert_sent={'true' if status == 'SENT' else 'false'}\n")
+
+
+def write_step_summary(result: dict | None = None, error: str | None = None) -> None:
+    summary_path = os.getenv("GITHUB_STEP_SUMMARY")
+    if not summary_path:
+        return
+    lines = ["## AI Crypto Trader scan", "", f"Sursa: `{OKX_BASE_URL}` (lumanari inchise 4H/1H/15m)", ""]
+    if error is not None:
+        lines += [f"Rezultat: **EROARE** - `{error}`", ""]
+    else:
+        assert result is not None
+        lines += [f"Rezultat: **{result.get('status', 'UNKNOWN')}**", ""]
+        for item in result.get("results", []):
+            signal = item.get("signal")
+            if signal:
+                lines.append(
+                    f"- {signal['symbol']} {signal['direction']}: entry {signal['entry']:,.2f}, "
+                    f"SL {signal['stop']:,.2f}, TP {signal['target']:,.2f}, R:R {signal['rr']:.2f}, "
+                    f"expira {utc_iso(signal['expires_at_ms'])}"
+                )
+            elif item.get("detected_at"):
+                lines.append(f"- {item['status']} la {item['detected_at']}")
+            else:
+                lines.append(f"- {item['status']}")
+        lines.append("")
+    with Path(summary_path).open("a", encoding="utf-8") as handle:
+        handle.write("\n".join(lines) + "\n")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -653,10 +712,11 @@ def main(argv: list[str] | None = None) -> int:
             config = read_json(package_dir(root) / "config-v0.1.json")
             require_delivery_identity(root, token, chat_id, config)
             sender = lambda message: telegram_call(token, "sendMessage", {"chat_id": chat_id, "text": message})
-        client = BybitClient()
+        client = OkxClient()
         if args.command == "scan":
             result = scan_once(root, client, dry_run, sender)
             write_github_outputs(result)
+            write_step_summary(result)
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0
         interval = int(read_json(package_dir(root) / "config-v0.1.json")["scan_interval_seconds"])
@@ -670,6 +730,8 @@ def main(argv: list[str] | None = None) -> int:
                 LOGGER.error("scan_error=%s", exc)
             time.sleep(interval)
     except (MonitorError, TelegramError) as exc:
+        if args.command == "scan":
+            write_step_summary(error=str(exc))
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
 
