@@ -1,9 +1,9 @@
 {
   "config_version": "v0.1",
   "rules_version": "v0.1",
-  "exchange": "BYBIT",
-  "category": "linear",
-  "symbols": ["BTCUSDT"],
+  "exchange": "OKX",
+  "category": "SWAP",
+  "symbols": ["BTC-USDT-SWAP"],
   "expected_bot_username": "DorianTradingSignals_bot",
   "intervals": {"context": "240", "structure": "60", "trigger": "15"},
   "history_limits": {"context": 240, "structure": 160, "trigger": 160},

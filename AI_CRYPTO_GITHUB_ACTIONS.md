@@ -8,10 +8,10 @@ Workflow-ul accepta numai rulare manuala `workflow_dispatch`, in dry-run. Blocul
 
 Scannerul:
 
-- foloseste endpointurile publice Bybit, fara API key;
-- foloseste implicit `https://api-demo.bybit.com`; domeniul poate fi schimbat prin `BYBIT_BASE_URL`;
-- porneste cu `BTCUSDT`, configurabil in `ai_crypto_monitor/config-v0.1.json` la `symbols`;
-- foloseste context 4H, structura 1H si ultima lumanare 15m inchisa pentru trigger;
+- foloseste endpointurile publice OKX (`https://www.okx.com/api/v5`), fara API key; Bybit raspunde HTTP 403 de pe runnerele GitHub;
+- porneste cu `BTC-USDT-SWAP`, configurabil in `ai_crypto_monitor/config-v0.1.json` la `symbols`;
+- foloseste context 4H, structura 1H si ultima lumanare 15m inchisa pentru trigger; lumanarile OKX cu `confirm != "1"` sunt excluse;
+- scrie rezultatul fiecarei rulari (inclusiv `NO_ENTRY` si erorile) in GitHub Step Summary, nu in Telegram;
 - cere sweep, revenire, confirmare, Entry, SL structural, TP structural si R:R minim;
 - respinge date incomplete, vechi sau semnale expirate;
 - nu trimite WATCH, startup, raport periodic sau mesaj `NO_ENTRY`;

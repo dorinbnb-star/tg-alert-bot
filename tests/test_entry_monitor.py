@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -13,6 +13,38 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from ai_crypto_monitor import entry_monitor as monitor  # noqa: E402
+
+ALIGNED_NOW_MS = 1_800_000_000_000 + 30_000
+OKX_BAR_MINUTES = {"15m": 15, "1H": 60, "4H": 240}
+
+
+def okx_row(start_ms: int, close: float = 100.0, confirm: str = "1") -> list[str]:
+    return [str(start_ms), str(close), str(close + 0.2), str(close - 0.2), str(close), "10", "0.1", "1000", confirm]
+
+
+def okx_rows(minutes: int, now_ms: int, count: int) -> list[list[str]]:
+    duration = minutes * 60_000
+    open_start = (now_ms // duration) * duration
+    return [okx_row(open_start - index * duration, confirm="0" if index == 0 else "1") for index in range(count)]
+
+
+def fake_okx(candle_now_ms: int, server_now_ms: int):
+    def fake_http_json(url: str, *, params: dict | None = None, method: str = "GET", timeout: int = 15) -> dict:
+        if url.endswith("/api/v5/public/time"):
+            return {"code": "0", "data": [{"ts": str(server_now_ms)}]}
+        if url.endswith("/api/v5/market/candles"):
+            assert params is not None
+            rows = okx_rows(OKX_BAR_MINUTES[params["bar"]], candle_now_ms, int(params["limit"]))
+            return {"code": "0", "msg": "", "data": rows}
+        raise AssertionError(f"Unexpected URL {url}")
+    return fake_http_json
+
+
+def copy_config(target: Path) -> None:
+    package = target / "ai_crypto_monitor"
+    package.mkdir(parents=True)
+    for name in ("config-v0.1.json", "rules-v0.1.json"):
+        shutil.copy(PROJECT_ROOT / "ai_crypto_monitor" / name, package / name)
 
 
 def candle(start_ms: int, close: float, *, high: float | None = None, low: float | None = None) -> monitor.Candle:
@@ -141,32 +173,99 @@ class EntryMonitorTests(unittest.TestCase):
         self.assertNotIn(token, str(caught.exception))
         self.assertIn("HTTP 401", str(caught.exception))
 
-    def test_bybit_unavailable_is_safe_error(self) -> None:
+    def test_okx_network_error_is_safe_error(self) -> None:
         network_error = urllib.error.URLError("offline")
         with patch("urllib.request.urlopen", side_effect=network_error):
             with self.assertRaisesRegex(monitor.MonitorError, "Eroare retea"):
-                monitor.http_json("https://api.bybit.com/v5/market/time")
+                monitor.OkxClient().server_time_ms()
 
-    def test_bybit_base_url_and_public_candle_intervals_are_configurable(self) -> None:
-        empty_klines = {"retCode": 0, "result": {"list": []}}
-        with patch.dict(os.environ, {"BYBIT_BASE_URL": ""}):
-            self.assertEqual("https://api-demo.bybit.com", monitor.BybitClient().base_url)
+    def test_okx_http_error_reports_status(self) -> None:
+        http_error = urllib.error.HTTPError("redacted", 403, "Forbidden", {}, None)
+        with patch("urllib.request.urlopen", side_effect=http_error):
+            with self.assertRaisesRegex(monitor.MonitorError, "HTTP 403"):
+                monitor.OkxClient().klines("BTC-USDT-SWAP", "15", 3)
 
-        with patch.dict(os.environ, {"BYBIT_BASE_URL": "https://market.example/"}), patch.object(
-            monitor, "http_json", return_value=empty_klines,
-        ) as request:
-            client = monitor.BybitClient()
-            client.klines("BTCUSDT", "60", 160)
-            client.klines("BTCUSDT", "15", 160)
+    def test_okx_api_error_code_is_rejected(self) -> None:
+        with patch.object(monitor, "http_json", return_value={"code": "51001", "msg": "Instrument ID does not exist", "data": []}):
+            with self.assertRaisesRegex(monitor.MonitorError, "code=51001"):
+                monitor.OkxClient().klines("BTC-USDT-SWAP", "60", 3)
 
+    def test_okx_candles_map_to_internal_format(self) -> None:
+        payload = {"code": "0", "msg": "", "data": [
+            ["1800000900000", "101", "102", "100", "101.5", "7", "0.07", "700", "1"],
+            ["1800000000000", "100", "101", "99", "100.5", "5", "0.05", "500", "1"],
+        ]}
+        with patch.object(monitor, "http_json", return_value=payload) as request:
+            client = monitor.OkxClient()
+            candles = client.klines("BTC-USDT-SWAP", "15", 2)
+            client.klines("BTC-USDT-SWAP", "60", 2)
+            client.klines("BTC-USDT-SWAP", "240", 2)
         self.assertEqual(
-            ["https://market.example/v5/market/kline"] * 2,
+            ["https://www.okx.com/api/v5/market/candles"] * 3,
             [call.args[0] for call in request.call_args_list],
         )
+        self.assertEqual(["15m", "1H", "4H"], [call.kwargs["params"]["bar"] for call in request.call_args_list])
+        self.assertEqual({"BTC-USDT-SWAP"}, {call.kwargs["params"]["instId"] for call in request.call_args_list})
         self.assertEqual(
-            ["60", "15"],
-            [call.kwargs["params"]["interval"] for call in request.call_args_list],
+            [
+                monitor.Candle(1_800_000_000_000, 100.0, 101.0, 99.0, 100.5, 5.0),
+                monitor.Candle(1_800_000_900_000, 101.0, 102.0, 100.0, 101.5, 7.0),
+            ],
+            candles,
         )
+
+    def test_okx_rejects_timestamps_not_strictly_descending(self) -> None:
+        ascending = [okx_row(1_800_000_000_000), okx_row(1_800_000_900_000)]
+        duplicated = [okx_row(1_800_000_900_000), okx_row(1_800_000_900_000)]
+        for rows in (ascending, duplicated):
+            with self.assertRaisesRegex(monitor.MonitorError, "descrescatoare"):
+                monitor.parse_okx_candles(rows, "15")
+
+    def test_okx_rejects_incomplete_or_non_numeric_rows(self) -> None:
+        with self.assertRaisesRegex(monitor.MonitorError, "incompleta"):
+            monitor.parse_okx_candles([["1800000000000", "100", "101"]], "15")
+        bad = okx_row(1_800_000_000_000)
+        bad[2] = "n/a"
+        with self.assertRaisesRegex(monitor.MonitorError, "nenumerice"):
+            monitor.parse_okx_candles([bad], "15")
+
+    def test_okx_open_candle_is_excluded(self) -> None:
+        rows = [okx_row(1_800_001_800_000, confirm="0"), okx_row(1_800_000_900_000), okx_row(1_800_000_000_000)]
+        candles = monitor.parse_okx_candles(rows, "15")
+        self.assertEqual([1_800_000_000_000, 1_800_000_900_000], [c.start_ms for c in candles])
+
+    def test_fetch_closed_market_uses_only_closed_okx_candles(self) -> None:
+        config = monitor.read_json(PROJECT_ROOT / "ai_crypto_monitor" / "config-v0.1.json")
+        config["symbol"] = "BTC-USDT-SWAP"
+        with patch.object(monitor, "http_json", side_effect=fake_okx(ALIGNED_NOW_MS, ALIGNED_NOW_MS)):
+            now_ms, series = monitor.fetch_closed_market(monitor.OkxClient(), config)
+        self.assertEqual(ALIGNED_NOW_MS, now_ms)
+        for key, minutes in (("context", 240), ("structure", 60), ("trigger", 15)):
+            duration = minutes * 60_000
+            open_start = (ALIGNED_NOW_MS // duration) * duration
+            self.assertEqual(open_start - duration, series[key][-1].start_ms)
+            self.assertTrue(all(c.start_ms + duration <= now_ms for c in series[key]))
+            starts = [c.start_ms for c in series[key]]
+            self.assertEqual(sorted(set(starts)), starts)
+
+    def test_stale_okx_data_is_rejected(self) -> None:
+        config = monitor.read_json(PROJECT_ROOT / "ai_crypto_monitor" / "config-v0.1.json")
+        config["symbol"] = "BTC-USDT-SWAP"
+        two_hours_later = ALIGNED_NOW_MS + 2 * 60 * 60_000
+        with patch.object(monitor, "http_json", side_effect=fake_okx(ALIGNED_NOW_MS, two_hours_later)):
+            with self.assertRaisesRegex(monitor.MonitorError, "vechi"):
+                monitor.fetch_closed_market(monitor.OkxClient(), config)
+
+    def test_okx_no_entry_scan_is_silent_in_send_mode(self) -> None:
+        sender_calls: list[str] = []
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            copy_config(root)
+            with patch.object(monitor, "http_json", side_effect=fake_okx(ALIGNED_NOW_MS, ALIGNED_NOW_MS)):
+                result = monitor.scan_once(root, monitor.OkxClient(), False, sender=sender_calls.append)
+            self.assertFalse((root / "ai_crypto_monitor" / "state" / "dedup.json").exists())
+        self.assertEqual("NO_ENTRY", result["status"])
+        self.assertEqual([], sender_calls)
 
     def test_technical_message_is_one_shot(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
