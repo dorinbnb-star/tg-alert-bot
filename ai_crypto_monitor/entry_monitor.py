@@ -22,6 +22,7 @@ from typing import Callable
 LOGGER = logging.getLogger("entry-monitor")
 OKX_BASE_URL = "https://www.okx.com"
 OKX_BARS = {"15": "15m", "60": "1H", "240": "4H"}
+OKX_HEADERS = {"Accept": "application/json", "User-Agent": "ai-crypto-trader-diagnostic/1.0"}
 TELEGRAM_BASE = "https://api.telegram.org"
 TECHNICAL_TEST_MESSAGE = (
     "TEST AI Crypto Trader: conexiunea Telegram functioneaza. "
@@ -136,7 +137,16 @@ def credentials(env_file: Path | None) -> tuple[str, str]:
     return token, chat_id
 
 
-def http_json(url: str, *, params: dict | None = None, method: str = "GET", timeout: int = 15) -> dict:
+def http_json(
+    url: str,
+    *,
+    params: dict | None = None,
+    method: str = "GET",
+    timeout: int = 15,
+    headers: dict[str, str] | None = None,
+    endpoint: str | None = None,
+) -> dict:
+    # endpoint is a caller-supplied safe label; never derive it from url (Telegram urls carry the token).
     encoded = urllib.parse.urlencode(params or {}).encode("utf-8")
     request_url = url
     data = None
@@ -144,16 +154,17 @@ def http_json(url: str, *, params: dict | None = None, method: str = "GET", time
         request_url += "?" + encoded.decode("ascii")
     elif method == "POST":
         data = encoded
-    request = urllib.request.Request(request_url, data=data, method=method)
+    request = urllib.request.Request(request_url, data=data, method=method, headers=headers or {})
+    where = f" la {endpoint}" if endpoint else ""
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        raise MonitorError(f"HTTP {exc.code}") from None
+        raise MonitorError(f"HTTP {exc.code}{where}") from None
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-        raise MonitorError(f"Eroare retea: {type(exc).__name__}") from None
+        raise MonitorError(f"Eroare retea: {type(exc).__name__}{where}") from None
     if not isinstance(payload, dict):
-        raise MonitorError("Raspuns API invalid")
+        raise MonitorError(f"Raspuns API invalid{where}")
     return payload
 
 
@@ -194,8 +205,11 @@ class OkxClient:
     def __init__(self, base_url: str = OKX_BASE_URL):
         self.base_url = base_url.rstrip("/")
 
+    def _get(self, path: str, params: dict | None = None) -> dict:
+        return http_json(f"{self.base_url}{path}", params=params, headers=OKX_HEADERS, endpoint=path)
+
     def server_time_ms(self) -> int:
-        data = okx_data(http_json(f"{self.base_url}/api/v5/public/time"), "time")
+        data = okx_data(self._get("/api/v5/public/time"), "time")
         try:
             return int(data[0]["ts"])
         except (IndexError, KeyError, TypeError, ValueError):
@@ -204,14 +218,14 @@ class OkxClient:
     def klines(self, symbol: str, interval: str, limit: int) -> list[Candle]:
         if interval not in OKX_BARS:
             raise MonitorError(f"Interval neacceptat: {interval}")
-        payload = http_json(
-            f"{self.base_url}/api/v5/market/candles",
-            params={"instId": symbol, "bar": OKX_BARS[interval], "limit": str(limit)},
+        payload = self._get(
+            "/api/v5/market/candles",
+            {"instId": symbol, "bar": OKX_BARS[interval], "limit": str(limit)},
         )
         return parse_okx_candles(okx_data(payload, f"candles {interval}"), interval)
 
     def last_price(self, symbol: str) -> float:
-        payload = http_json(f"{self.base_url}/api/v5/market/ticker", params={"instId": symbol})
+        payload = self._get("/api/v5/market/ticker", {"instId": symbol})
         data = okx_data(payload, "ticker")
         try:
             return float(data[0]["last"])

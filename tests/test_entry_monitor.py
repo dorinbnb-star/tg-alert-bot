@@ -29,7 +29,7 @@ def okx_rows(minutes: int, now_ms: int, count: int) -> list[list[str]]:
 
 
 def fake_okx(candle_now_ms: int, server_now_ms: int):
-    def fake_http_json(url: str, *, params: dict | None = None, method: str = "GET", timeout: int = 15) -> dict:
+    def fake_http_json(url: str, *, params: dict | None = None, **_: object) -> dict:
         if url.endswith("/api/v5/public/time"):
             return {"code": "0", "data": [{"ts": str(server_now_ms)}]}
         if url.endswith("/api/v5/market/candles"):
@@ -173,17 +173,67 @@ class EntryMonitorTests(unittest.TestCase):
         self.assertNotIn(token, str(caught.exception))
         self.assertIn("HTTP 401", str(caught.exception))
 
-    def test_okx_network_error_is_safe_error(self) -> None:
+    def test_okx_network_error_names_endpoint(self) -> None:
         network_error = urllib.error.URLError("offline")
         with patch("urllib.request.urlopen", side_effect=network_error):
-            with self.assertRaisesRegex(monitor.MonitorError, "Eroare retea"):
+            with self.assertRaises(monitor.MonitorError) as caught:
                 monitor.OkxClient().server_time_ms()
+        self.assertEqual("Eroare retea: URLError la /api/v5/public/time", str(caught.exception))
 
-    def test_okx_http_error_reports_status(self) -> None:
+    def test_okx_http_error_names_endpoint_without_query(self) -> None:
         http_error = urllib.error.HTTPError("redacted", 403, "Forbidden", {}, None)
         with patch("urllib.request.urlopen", side_effect=http_error):
-            with self.assertRaisesRegex(monitor.MonitorError, "HTTP 403"):
+            with self.assertRaises(monitor.MonitorError) as caught:
                 monitor.OkxClient().klines("BTC-USDT-SWAP", "15", 3)
+        message = str(caught.exception)
+        self.assertEqual("HTTP 403 la /api/v5/market/candles", message)
+        for fragment in ("?", "instId", "www.okx.com"):
+            self.assertNotIn(fragment, message)
+
+    def test_okx_requests_send_diagnostic_headers(self) -> None:
+        sent: list = []
+
+        class FakeResponse:
+            def __init__(self, body: bytes):
+                self.body = body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc: object) -> None:
+                return None
+
+            def read(self) -> bytes:
+                return self.body
+
+        def fake_urlopen(request, timeout: int):
+            sent.append(request)
+            if request.full_url.startswith("https://www.okx.com/api/v5/public/time"):
+                return FakeResponse(b'{"code":"0","data":[{"ts":"1800000030000"}]}')
+            if "/api/v5/market/ticker" in request.full_url:
+                return FakeResponse(b'{"code":"0","data":[{"last":"100.5"}]}')
+            return FakeResponse(b'{"code":"0","data":[]}')
+
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            client = monitor.OkxClient()
+            client.server_time_ms()
+            client.klines("BTC-USDT-SWAP", "240", 3)
+            client.klines("BTC-USDT-SWAP", "60", 3)
+            client.klines("BTC-USDT-SWAP", "15", 3)
+            client.last_price("BTC-USDT-SWAP")
+        self.assertEqual(5, len(sent))
+        for request in sent:
+            self.assertEqual("ai-crypto-trader-diagnostic/1.0", request.get_header("User-agent"))
+            self.assertEqual("application/json", request.get_header("Accept"))
+
+    def test_telegram_errors_never_carry_endpoint_label(self) -> None:
+        token = "123456:VERY_SECRET_TOKEN"
+        http_error = urllib.error.HTTPError("redacted", 403, "Forbidden", {}, None)
+        with patch("urllib.request.urlopen", side_effect=http_error):
+            with self.assertRaises(monitor.TelegramError) as caught:
+                monitor.telegram_call(token, "sendMessage", {"chat_id": "1", "text": "x"})
+        self.assertNotIn(token, str(caught.exception))
+        self.assertNotIn(" la ", str(caught.exception))
 
     def test_okx_api_error_code_is_rejected(self) -> None:
         with patch.object(monitor, "http_json", return_value={"code": "51001", "msg": "Instrument ID does not exist", "data": []}):
@@ -206,6 +256,7 @@ class EntryMonitorTests(unittest.TestCase):
         )
         self.assertEqual(["15m", "1H", "4H"], [call.kwargs["params"]["bar"] for call in request.call_args_list])
         self.assertEqual({"BTC-USDT-SWAP"}, {call.kwargs["params"]["instId"] for call in request.call_args_list})
+        self.assertEqual({"/api/v5/market/candles"}, {call.kwargs["endpoint"] for call in request.call_args_list})
         self.assertEqual(
             [
                 monitor.Candle(1_800_000_000_000, 100.0, 101.0, 99.0, 100.5, 5.0),
