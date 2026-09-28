@@ -2,9 +2,9 @@
 
 Workflow: `.github/workflows/ai-crypto-trader.yml`.
 
-## Stare initiala sigura
+## Stare curenta: dry-run automat
 
-Workflow-ul accepta numai rulare manuala `workflow_dispatch`, in dry-run. Blocul `schedule` pentru minutele `01,16,31,46` este pregatit, dar comentat. Astfel, publicarea codului nu activeaza monitorizarea.
+Workflow-ul ruleaza la minutele UTC `01,16,31,46` din fiecare ora (`schedule`) si manual (`workflow_dispatch`). Ambele cai ruleaza numai testele si scannerul cu `--dry-run`. Nicio cale a workflow-ului nu citeste `TELEGRAM_TOKEN`/`TELEGRAM_CHAT_ID`, nu apeleaza Telegram, nu salveaza deduplicarea si nu trimite notificari. Rezultatul fiecarei rulari apare in GitHub Step Summary. Testul `tests/test_workflow.py` verifica aceste reguli la fiecare rulare.
 
 Scannerul:
 
@@ -19,7 +19,7 @@ Scannerul:
 
 ## Secrete GitHub
 
-Nu incarca `.env`. In repository-ul GitHub:
+Workflow-ul actual nu foloseste secrete. Pasii de mai jos sunt necesari numai pentru o viitoare cale de trimitere, care nu exista inca. Nu incarca `.env`. In repository-ul GitHub:
 
 1. Deschide `Settings`.
 2. Alege `Secrets and variables` -> `Actions`.
@@ -35,16 +35,12 @@ Valorile nu trebuie introduse in Variables, fisiere, workflow, loguri sau commit
 2. Selecteaza `AI Crypto Trader Entry Monitor`.
 3. Apasa `Run workflow`.
 
-Rularea manuala nu citeste secretele si nu poate trimite Telegram. Un rezultat `NO_ENTRY` este succes si ramane fara notificare.
+Rularea manuala si cea programata nu citesc secretele si nu pot trimite Telegram. Un rezultat `NO_ENTRY` este succes si ramane fara notificare. O eroare tehnica (date OKX lipsa, vechi sau HTTP) face rularea rosie.
 
 ## Deduplicare
 
-La inceput se restaureaza cel mai recent cache `ai-crypto-dedup-*`. Fisierul este modificat numai dupa ce Telegram accepta alerta. Cache-ul nou este salvat numai cand pasul scannerului produce `alert_sent=true`. `concurrency` nu permite doua scanari simultane.
+In dry-run nu se scrie si nu se salveaza starea de deduplicare. `concurrency` nu permite doua scanari simultane.
 
-Risc rezidual: daca Telegram accepta alerta, dar GitHub nu reuseste sa salveze cache-ul, o rulare viitoare poate repeta acea alerta. Mesajul contine timestamp-ul confirmarii, iar logul GitHub arata esecul cache-ului; acest caz necesita verificare manuala.
+## Programare
 
-## Activare ulterioara
-
-Dupa ce dry-run-ul GitHub este verde si cele doua Secrets exista, decomenteaza blocul `schedule` din workflow. Nu schimba expresia cron: `1,16,31,46 * * * *` este UTC, iar minutele sunt identice in orice fus orar.
-
-GitHub Actions poate porni cu cateva minute intarziere. Scannerul verifica prospetimea si expirarea la executie, deci o rulare prea tarzie nu trimite un entry expirat.
+Expresia cron `1,16,31,46 * * * *` este UTC. GitHub Actions poate porni cu cateva minute intarziere sau poate sari rulari cand este aglomerat. Scannerul verifica prospetimea si expirarea la executie.
