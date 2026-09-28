@@ -1,14 +1,19 @@
 name: AI Crypto Trader Entry Monitor
 
 # Dry-run only: no path in this workflow reads Telegram secrets, calls Telegram or saves dedup state.
-# Cadence: each tick waits for its 10-minute slot, scans inside 08:00-22:00 Europe/Brussels and dispatches the
-# next tick with the ephemeral GITHUB_TOKEN (GitHub `schedule` created 1 of ~40 expected runs on 2026-09-28).
-# The crons below only seed or revive the chain.
+# Cadence: each tick is delayed by an Environment wait timer on its `wait` job (no runner is held while waiting),
+# scans inside 08:00-22:00 Europe/Brussels and dispatches the next tick with the ephemeral GITHUB_TOKEN.
+# After the last evening scan the next tick waits in an overnight environment until ~08:00.
+# The crons below only seed or recover the chain. Cancelling a run stops the chain.
 on:
   workflow_dispatch:
     inputs:
-      slot:
-        description: "UTC time of this tick, set by the previous tick (empty = now)"
+      wait_env:
+        description: "Wait environment for this tick (set by the previous tick; empty = run now)"
+        required: false
+        default: ""
+      not_before:
+        description: "Earliest expected UTC start after the wait (set by the previous tick)"
         required: false
         default: ""
       ticks:
@@ -17,7 +22,7 @@ on:
         default: ""
   schedule:
     - cron: "52 5,6 * * *"
-    - cron: "5,15,25,35,45,55 6-20 * * *"
+    - cron: "7 6-20 * * *"
 
 permissions:
   contents: read
@@ -27,14 +32,28 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  monitor:
+  wait:
+    if: inputs.wait_env != ''
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 2
+    environment: ${{ inputs.wait_env }}
+    permissions: {}
+
+    steps:
+      - name: Wait timer elapsed
+        run: echo "Environment wait timer elapsed"
+
+  monitor:
+    needs: wait
+    if: ${{ !cancelled() && (needs.wait.result == 'success' || needs.wait.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       contents: read
     outputs:
       chain: ${{ steps.cadence.outputs.chain }}
-      next_slot: ${{ steps.cadence.outputs.next_slot }}
+      next_wait_env: ${{ steps.cadence.outputs.next_wait_env }}
+      next_not_before: ${{ steps.cadence.outputs.next_not_before }}
       next_ticks: ${{ steps.cadence.outputs.next_ticks }}
 
     steps:
@@ -46,13 +65,14 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Wait for slot and check Brussels scan window
+      - name: Plan next tick and check Brussels scan window
         id: cadence
         env:
-          SLOT: ${{ inputs.slot }}
+          WAIT_ENV: ${{ inputs.wait_env }}
+          NOT_BEFORE: ${{ inputs.not_before }}
           TICKS: ${{ inputs.ticks }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'main' }}
-        run: python scheduler/cadence.py --slot "$SLOT" --ticks "$TICKS" --default-branch "$DEFAULT_BRANCH" --ref-name "$GITHUB_REF_NAME"
+        run: python scheduler/cadence.py --wait-env "$WAIT_ENV" --not-before "$NOT_BEFORE" --ticks "$TICKS" --default-branch "$DEFAULT_BRANCH" --ref-name "$GITHUB_REF_NAME"
 
       - name: Run tests
         if: steps.cadence.outputs.active == 'true'
@@ -64,16 +84,21 @@ jobs:
 
   next-tick:
     needs: monitor
-    if: always() && needs.monitor.outputs.chain == 'true'
+    if: ${{ !cancelled() && needs.monitor.outputs.chain == 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 2
+    timeout-minutes: 3
     permissions:
       actions: write
+      contents: read
 
     steps:
-      - name: Dispatch next 10-minute tick
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Dispatch next tick (bounded retry)
         env:
-          GH_TOKEN: ${{ github.token }}
-          NEXT_SLOT: ${{ needs.monitor.outputs.next_slot }}
+          GITHUB_TOKEN: ${{ github.token }}
+          NEXT_WAIT_ENV: ${{ needs.monitor.outputs.next_wait_env }}
+          NEXT_NOT_BEFORE: ${{ needs.monitor.outputs.next_not_before }}
           NEXT_TICKS: ${{ needs.monitor.outputs.next_ticks }}
-        run: gh workflow run ai-crypto-trader.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" -f slot="$NEXT_SLOT" -f ticks="$NEXT_TICKS"
+        run: python3 scheduler/dispatch.py --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" --workflow ai-crypto-trader.yml --wait-env "$NEXT_WAIT_ENV" --not-before "$NEXT_NOT_BEFORE" --ticks "$NEXT_TICKS"

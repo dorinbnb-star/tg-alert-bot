@@ -47,28 +47,31 @@ In dry-run nu se scrie si nu se salveaza starea de deduplicare. `concurrency` nu
 
 Pe 2026-09-28, cu workflow-ul `active`, repository public si branch implicit `main`, GitHub a creat o singura rulare `schedule` (17:02:56 UTC) din aproximativ 40 de sloturi cron asteptate intre 08:46 si 18:31 UTC, iar dupa commitul 819c3b7 nu a creat rularile de la 18:40 si 18:50 UTC. Sloturile lipsa nu apar deloc in istoric (nici esuate, nici anulate, nici in coada), deci nu au fost create de planificatorul GitHub. Documentatia GitHub spune ca evenimentul `schedule` poate fi intarziat, iar unele rulari pot fi abandonate la incarcare mare, mai ales la inceputul orei. Prin urmare `schedule` nu poate garanta pauza maxima de 15 minute.
 
-### Declansator principal: lant auto-programat, fara PAT si fara cont extern
+### Declansator principal: lant cu Environment wait timers, fara PAT si fara cont extern
 
-Fiecare rulare este un "tic":
+Fiecare rulare este un "tic" cu trei joburi:
 
-1. `scheduler/cadence.py` asteapta slotul primit de la ticul anterior (minutele `:00`, `:10`, ..., `:50`; maximum 11 minute), apoi verifica fereastra `08:00-22:00 Europe/Brussels` dupa ceasul real.
-2. Numai in fereastra ruleaza testele si scannerul `--dry-run`.
-3. Jobul separat `next-tick` (singurul cu `actions: write`) porneste urmatorul tic prin `workflow_dispatch`, cu tokenul efemer al rularii (`github.token`). GitHub permite ca `GITHUB_TOKEN` sa creeze rulari noi prin `workflow_dispatch`. Jobul ruleaza si daca scanarea a esuat, ca o eroare OKX sa nu rupa lantul.
-4. Dupa scanarea de la `21:50`, urmatorul slot (`22:00`) este in afara ferestrei, deci lantul se opreste.
+1. `wait`: singurul job care foloseste un environment. Asteapta wait timer-ul environment-ului primit de la ticul anterior (`inputs.wait_env`). In timpul asteptarii nu este ocupat niciun runner, iar timpul de asteptare nu este facturat. La pornire manuala sau din cron (fara `wait_env`) jobul este sarit.
+2. `monitor`: ruleaza `scheduler/cadence.py`, care nu doarme. Planificatorul verifica ora reala in `Europe/Brussels`; numai intre `08:00` si `22:00` ruleaza testele si scannerul `--dry-run`. Apoi alege environment-ul de asteptare pentru succesor. Verifica si ca wait timer-ul chiar a fost aplicat: daca rularea porneste cu peste 30 de secunde inainte de `not_before`, ori environment-ul nu este in lista de mai jos, jobul esueaza si lantul se opreste (protectie contra buclelor rapide daca un environment lipseste sau nu are timer).
+3. `next-tick`: singurul job cu `actions: write`. Porneste succesorul prin `workflow_dispatch` cu tokenul efemer al rularii (`github.token`) si reincearca de cel mult 3 ori (dupa 5, 15 si 30 de secunde) la erori de retea, 408, 429 sau 5xx. Ruleaza si daca scanarea a esuat, ca o eroare OKX sa nu rupa lantul. Anularea manuala a unei rulari opreste lantul.
 
-Pornirea si repornirea: cronul `52 5,6 * * *` porneste lantul la `07:52` ora Bruxelles (vara si iarna); primul tic asteapta pana la `08:00`. Cronul `5,15,25,35,45,55 6-20 * * *` reporneste lantul daca s-a rupt. `concurrency` pastreaza o singura rulare activa si cel mult una in asteptare, deci lanturile duplicate se reduc singure la unul.
+Ziua: fiecare tic alege 9 sau 10 minute, astfel incat scanarea urmatoare sa cada cat mai aproape de minutele `:00`, `:10`, ..., `:50` (ultima la `21:50`). Seara: dupa scanarea de la `21:50`, succesorul asteapta intr-un environment overnight si porneste in jurul orei `08:00`, fara rulari in timpul noptii. Durata noptii este aleasa automat din fusul `Europe/Brussels`: 610 minute intr-o noapte normala (CET sau CEST), 550 in noaptea trecerii la ora de vara, 670 in noaptea trecerii la ora de iarna.
 
-Risc ramas: pornirea de dimineata si repornirea dupa o rupere depind de `schedule`, care pe 2026-09-28 a livrat 1 din ~40 de sloturi. Daca niciun cron nu porneste intre 07:52 si 08:15, prima scanare a zilei intarzie si auditul arata `FAIL`. O pornire manuala (`Run workflow` pe `main`) reporneste imediat lantul.
+Environments de creat in `Settings` > `Environments` (nume exacte; fara secrete, fara reviewers; `Deployment branches and tags` = `No restriction`):
 
-Pe alte branchuri decat `main`, lantul continua numai pentru un numar limitat de ticuri (inputul `ticks`), folosit pentru teste.
+| Environment | Wait timer (minute) | Folosit pentru |
+|---|---|---|
+| `scan-wait-9m` | 9 | tic de zi, aliniere la grila de 10 minute |
+| `scan-wait-10m` | 10 | tic de zi |
+| `scan-overnight-550m` | 550 | noaptea trecerii la ora de vara |
+| `scan-overnight-610m` | 610 | noapte normala |
+| `scan-overnight-670m` | 670 | noaptea trecerii la ora de iarna |
 
-Cost si limite: repository-ul este public, deci minutele GitHub-hosted sunt gratuite. In fereastra activa, un runner asteapta pana la ~10 minute pe tic (aproximativ 14 ore de runner pe zi). Aceasta este o incarcare continua a unui runner GitHub; conditiile GitHub Actions interzic activitatile care pun pe servere o sarcina disproportionata fata de beneficiu, deci exista un risc de politica pe care proprietarul il accepta la merge.
+Pornirea si recuperarea: cronul `52 5,6 * * *` (07:52 ora Bruxelles, vara si iarna) si cronul rar `7 6-20 * * *` (o data pe ora) pornesc lantul daca nu exista. `concurrency` pastreaza o singura rulare activa si cel mult una in asteptare, deci un cron care porneste in timp ce lantul este viu este anulat de urmatorul tic. Daca pornirea de dimineata ratata nu este acoperita de cron, un `Run workflow` manual pe `main` reporneste lantul.
 
-### Alternativa cu incarcare minima: cron extern cu PAT
+Pe alte branchuri decat `main`, lantul continua numai pentru un numar limitat de ticuri (inputul `ticks`), folosit pentru demonstratii.
 
-Daca riscul de mai sus nu este acceptat, un serviciu cron extern gratuit (de exemplu cron-job.org) poate trimite la fiecare 10 minute `POST https://api.github.com/repos/dorinbnb-star/tg-alert-bot/actions/workflows/ai-crypto-trader.yml/dispatches` cu corpul `{"ref":"main"}`, antetele `Accept: application/vnd.github+json`, `X-GitHub-Api-Version: 2022-11-28` si un token fine-grained limitat la acest repository, cu permisiunea `Actions: Read and write`. Necesita un cont extern si un token persistent.
-
-Poarta de fereastra din `scheduler/cadence.py` ramane activa in toate cazurile, deci nicio declansare nu poate produce scanari intre `22:00` si `07:59`.
+Poarta de fereastra din `scheduler/cadence.py` ramane activa in toate cazurile, deci nicio declansare nu poate produce teste, apeluri OKX sau scanari intre `22:00` si `07:59`.
 
 ### Audit al pauzelor reale
 

@@ -10,6 +10,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from diagnostics import scan_gap_audit as audit  # noqa: E402
+from scheduler import cadence  # noqa: E402
 
 WORKFLOW = PROJECT_ROOT / ".github" / "workflows" / "ai-crypto-trader.yml"
 AUDIT_WORKFLOW = PROJECT_ROOT / ".github" / "workflows" / "scan-gap-audit.yml"
@@ -32,6 +33,12 @@ def active_lines(path: Path = WORKFLOW) -> list[str]:
     return [line for line in lines if line.strip() and not line.lstrip().startswith("#")]
 
 
+def jobs(path: Path = WORKFLOW) -> dict[str, str]:
+    body = "\n".join(active_lines(path)).split("\njobs:\n", 1)[1]
+    parts = re.split(r"^  ([a-z-]+):$", body, flags=re.MULTILINE)
+    return {parts[index]: parts[index + 1] + "\n" for index in range(1, len(parts), 2)}
+
+
 def permission_lines(lines: list[str]) -> list[str]:
     start = lines.index("permissions:")
     permissions = []
@@ -43,29 +50,57 @@ def permission_lines(lines: list[str]) -> list[str]:
 
 
 class WorkflowDryRunOnlyTests(unittest.TestCase):
-    def test_seed_and_fallback_crons(self) -> None:
+    def test_seed_and_rare_recovery_crons(self) -> None:
         lines = active_lines()
         crons = [match.group(1) for line in lines if (match := re.fullmatch(r'\s*-\s*cron:\s*"([^"]*)"\s*', line))]
-        self.assertEqual(["52 5,6 * * *", "5,15,25,35,45,55 6-20 * * *"], crons)
+        self.assertEqual(["52 5,6 * * *", "7 6-20 * * *"], crons)
         self.assertIn("  schedule:", lines)
         self.assertIn("  workflow_dispatch:", lines)
 
-    def test_next_tick_dispatches_same_workflow_on_same_ref_with_ephemeral_token_only(self) -> None:
-        text = "\n".join(active_lines())
-        dispatches = [line for line in active_lines() if "gh workflow run" in line]
-        self.assertEqual(1, len(dispatches))
-        self.assertIn('gh workflow run ai-crypto-trader.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME"', dispatches[0])
-        self.assertIn("GH_TOKEN: ${{ github.token }}", text)
-        self.assertIn("if: always() && needs.monitor.outputs.chain == 'true'", text)
+    def test_only_the_wait_job_uses_an_environment_and_it_does_nothing_else(self) -> None:
+        wait = jobs()["wait"]
+        self.assertIn("    if: inputs.wait_env != ''\n", wait)
+        self.assertIn("    environment: ${{ inputs.wait_env }}\n", wait)
+        self.assertIn("    permissions: {}\n", wait)
+        self.assertIn("    timeout-minutes: 2\n", wait)
+        self.assertEqual(1, wait.count("run:"))
+        self.assertIn('run: echo "Environment wait timer elapsed"', wait)
+        for name, body in jobs().items():
+            if name != "wait":
+                self.assertNotIn("environment:", body, name)
 
-    def test_job_permissions_are_minimal(self) -> None:
+    def test_no_job_sleeps_on_the_runner(self) -> None:
         text = "\n".join(active_lines())
-        monitor, next_tick = text.split("\n  next-tick:\n")
+        self.assertNotIn("sleep", text)
+        for name, body in jobs().items():
+            minutes = int(re.search(r"timeout-minutes: (\d+)", body).group(1))
+            self.assertLessEqual(minutes, 5, name)
+        dispatch_source = (PROJECT_ROOT / "scheduler" / "dispatch.py").read_text(encoding="utf-8")
+        self.assertEqual(1, dispatch_source.count("sleeper(RETRY_DELAYS"))
+
+    def test_monitor_runs_after_wait_or_seed_and_is_read_only(self) -> None:
+        monitor = jobs()["monitor"]
+        self.assertIn("    needs: wait\n", monitor)
+        self.assertIn("    if: ${{ !cancelled() && (needs.wait.result == 'success' || needs.wait.result == 'skipped') }}\n", monitor)
         self.assertIn("    permissions:\n      contents: read\n", monitor)
         self.assertNotIn(": write", monitor)
-        self.assertIn("    permissions:\n      actions: write\n", next_tick)
+
+    def test_next_tick_dispatches_same_workflow_on_same_ref_with_ephemeral_token_only(self) -> None:
+        next_tick = jobs()["next-tick"]
+        self.assertIn("    if: ${{ !cancelled() && needs.monitor.outputs.chain == 'true' }}\n", next_tick)
+        self.assertIn("    permissions:\n      actions: write\n      contents: read\n", next_tick)
+        self.assertIn("GITHUB_TOKEN: ${{ github.token }}", next_tick)
+        self.assertIn(
+            'python3 scheduler/dispatch.py --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" --workflow ai-crypto-trader.yml',
+            next_tick,
+        )
         self.assertNotIn("entry_monitor.py", next_tick)
-        self.assertNotIn("contents:", next_tick)
+        self.assertNotIn("gh workflow run", "\n".join(active_lines()))
+
+    def test_documented_environments_match_the_planner(self) -> None:
+        docs = (PROJECT_ROOT / "AI_CRYPTO_GITHUB_ACTIONS.md").read_text(encoding="utf-8")
+        for minutes, name in cadence.WAIT_ENVIRONMENTS.items():
+            self.assertIn(f"| `{name}` | {minutes} |", docs)
 
     def test_scan_step_name_matches_gap_audit(self) -> None:
         scan_steps = [line for line in active_lines() if line.strip().startswith("- name: Dry-run scan")]
@@ -100,8 +135,7 @@ class WorkflowDryRunOnlyTests(unittest.TestCase):
         self.assertIn("concurrency:", lines)
         self.assertIn("  group: ai-crypto-trader-entry-monitor", lines)
         self.assertIn("  cancel-in-progress: false", lines)
-        self.assertIn("    timeout-minutes: 15", lines)
-        self.assertIn("    timeout-minutes: 2", lines)
+        self.assertIn("    timeout-minutes: 5", lines)
 
 
 class GapAuditWorkflowTests(unittest.TestCase):
