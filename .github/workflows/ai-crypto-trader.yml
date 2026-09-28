@@ -1,14 +1,13 @@
 name: AI Crypto Trader Entry Monitor
 
+# Dry-run only: no path in this workflow reads Telegram secrets, calls Telegram or saves dedup state.
 on:
   workflow_dispatch:
-  # Activare numai dupa configurarea secretelor si un dry-run verde:
-  # schedule:
-  #   - cron: "1,16,31,46 * * * *"
+  schedule:
+    - cron: "1,16,31,46 * * * *"
 
 permissions:
   contents: read
-  actions: write
 
 concurrency:
   group: ai-crypto-trader-entry-monitor
@@ -31,31 +30,5 @@ jobs:
       - name: Run tests
         run: python -m unittest discover -s tests -v
 
-      - name: Restore persistent dedup state
-        id: dedup_restore
-        uses: actions/cache/restore@v4
-        with:
-          path: ai_crypto_monitor/state/dedup.json
-          key: ai-crypto-dedup-${{ github.run_id }}
-          restore-keys: |
-            ai-crypto-dedup-
-
-      - name: Manual dry-run (OKX public candles, no Telegram, writes Step Summary)
-        id: scan_dry_run
-        if: github.event_name == 'workflow_dispatch'
+      - name: Dry-run scan (OKX public candles, no Telegram, writes Step Summary)
         run: python ai_crypto_monitor/entry_monitor.py scan --root "$GITHUB_WORKSPACE" --dry-run
-
-      - name: Scheduled entry-only scan
-        id: scan_send
-        if: github.event_name == 'schedule'
-        env:
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python ai_crypto_monitor/entry_monitor.py scan --root "$GITHUB_WORKSPACE" --send
-
-      - name: Save dedup state only after Telegram accepted an alert
-        if: github.event_name == 'schedule' && steps.scan_send.outputs.alert_sent == 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: ai_crypto_monitor/state/dedup.json
-          key: ai-crypto-dedup-${{ github.run_id }}
