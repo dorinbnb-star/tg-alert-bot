@@ -4,7 +4,7 @@ Workflow: `.github/workflows/ai-crypto-trader.yml`.
 
 ## Stare curenta: dry-run automat
 
-Workflow-ul ruleaza la minutele UTC `01,16,31,46` din fiecare ora (`schedule`) si manual (`workflow_dispatch`). Ambele cai ruleaza numai testele si scannerul cu `--dry-run`. Nicio cale a workflow-ului nu citeste `TELEGRAM_TOKEN`/`TELEGRAM_CHAT_ID`, nu apeleaza Telegram, nu salveaza deduplicarea si nu trimite notificari. Rezultatul fiecarei rulari apare in GitHub Step Summary. Testul `tests/test_workflow.py` verifica aceste reguli la fiecare rulare.
+Workflow-ul verifica programarea la fiecare 10 minute si ruleaza scannerul numai intre `08:00` inclusiv si `22:00` exclusiv in fusul `Europe/Brussels`. Poarta de timp foloseste direct fusul local, deci trecerea CET/CEST este automata. In intervalul `22:00-07:59` nu se face checkout, nu se ruleaza testele si nu se apeleaza OKX. Atat calea programata (`schedule`), cat si cea manuala (`workflow_dispatch`) raman `--dry-run`. Nicio cale a workflow-ului nu citeste `TELEGRAM_TOKEN`/`TELEGRAM_CHAT_ID`, nu apeleaza Telegram, nu salveaza deduplicarea si nu trimite notificari. Rezultatul fiecarei scanari apare in GitHub Step Summary. Testul `tests/test_workflow.py` verifica aceste reguli la fiecare rulare activa.
 
 Scannerul:
 
@@ -43,4 +43,4 @@ In dry-run nu se scrie si nu se salveaza starea de deduplicare. `concurrency` nu
 
 ## Programare
 
-Expresia cron `1,16,31,46 * * * *` este UTC. GitHub Actions poate porni cu cateva minute intarziere sau poate sari rulari cand este aglomerat. Scannerul verifica prospetimea si expirarea la executie.
+Expresia cron `*/10 6-20 * * *` acopera reuniunea orelor UTC necesare pentru programul `08:00-21:50 Europe/Brussels` atat vara, cat si iarna. Pasul `Check Brussels scan window` aplica limita locala exacta si opreste toti pasii de lucru in afara intervalului. GitHub Actions poate porni cu intarziere sau poate sari rulari cand este aglomerat; criteriul testului de stabilitate ramane ca pauza observata intre scanari sa nu depaseasca 15 minute.

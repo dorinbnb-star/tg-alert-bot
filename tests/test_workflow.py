@@ -26,12 +26,19 @@ def active_lines() -> list[str]:
 
 
 class WorkflowDryRunOnlyTests(unittest.TestCase):
-    def test_schedule_uses_exact_utc_cron(self) -> None:
+    def test_schedule_runs_every_ten_minutes_in_utc_union_window(self) -> None:
         lines = active_lines()
         crons = [match.group(1) for line in lines if (match := re.fullmatch(r'\s*-\s*cron:\s*"([^"]*)"\s*', line))]
-        self.assertEqual(["1,16,31,46 * * * *"], crons)
+        self.assertEqual(["*/10 6-20 * * *"], crons)
         self.assertIn("  schedule:", lines)
         self.assertIn("  workflow_dispatch:", lines)
+
+    def test_brussels_window_blocks_scans_from_22_to_08(self) -> None:
+        text = "\n".join(active_lines())
+        self.assertIn("TZ=Europe/Brussels date +%H", text)
+        self.assertIn('" -ge 8 ]', text)
+        self.assertIn('" -lt 22 ]', text)
+        self.assertEqual(4, text.count("if: steps.window.outputs.active == 'true'"))
 
     def test_every_scanner_call_is_dry_run(self) -> None:
         calls = [line for line in active_lines() if "entry_monitor.py" in line]

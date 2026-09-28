@@ -4,7 +4,9 @@ name: AI Crypto Trader Entry Monitor
 on:
   workflow_dispatch:
   schedule:
-    - cron: "1,16,31,46 * * * *"
+    # Covers 08:00-21:50 Europe/Brussels in both CET and CEST.
+    # The first step applies the exact local-time gate for DST transitions.
+    - cron: "*/10 6-20 * * *"
 
 permissions:
   contents: read
@@ -19,16 +21,32 @@ jobs:
     timeout-minutes: 5
 
     steps:
+      - name: Check Brussels scan window
+        id: window
+        shell: bash
+        run: |
+          local_hour="$(TZ=Europe/Brussels date +%H)"
+          if [ "$((10#$local_hour))" -ge 8 ] && [ "$((10#$local_hour))" -lt 22 ]; then
+            echo "active=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "active=false" >> "$GITHUB_OUTPUT"
+            echo "Scanner paused outside 08:00-22:00 Europe/Brussels."
+          fi
+
       - name: Checkout
+        if: steps.window.outputs.active == 'true'
         uses: actions/checkout@v4
 
       - name: Setup Python
+        if: steps.window.outputs.active == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
       - name: Run tests
+        if: steps.window.outputs.active == 'true'
         run: python -m unittest discover -s tests -v
 
       - name: Dry-run scan (OKX public candles, no Telegram, writes Step Summary)
+        if: steps.window.outputs.active == 'true'
         run: python ai_crypto_monitor/entry_monitor.py scan --root "$GITHUB_WORKSPACE" --dry-run
