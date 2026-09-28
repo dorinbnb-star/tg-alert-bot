@@ -43,12 +43,29 @@ def permission_lines(lines: list[str]) -> list[str]:
 
 
 class WorkflowDryRunOnlyTests(unittest.TestCase):
-    def test_fallback_schedule_runs_every_ten_minutes_off_the_hour_in_utc_union_window(self) -> None:
+    def test_seed_and_fallback_crons(self) -> None:
         lines = active_lines()
         crons = [match.group(1) for line in lines if (match := re.fullmatch(r'\s*-\s*cron:\s*"([^"]*)"\s*', line))]
-        self.assertEqual(["5,15,25,35,45,55 6-20 * * *"], crons)
+        self.assertEqual(["52 5,6 * * *", "5,15,25,35,45,55 6-20 * * *"], crons)
         self.assertIn("  schedule:", lines)
         self.assertIn("  workflow_dispatch:", lines)
+
+    def test_next_tick_dispatches_same_workflow_on_same_ref_with_ephemeral_token_only(self) -> None:
+        text = "\n".join(active_lines())
+        dispatches = [line for line in active_lines() if "gh workflow run" in line]
+        self.assertEqual(1, len(dispatches))
+        self.assertIn('gh workflow run ai-crypto-trader.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME"', dispatches[0])
+        self.assertIn("GH_TOKEN: ${{ github.token }}", text)
+        self.assertIn("if: always() && needs.monitor.outputs.chain == 'true'", text)
+
+    def test_job_permissions_are_minimal(self) -> None:
+        text = "\n".join(active_lines())
+        monitor, next_tick = text.split("\n  next-tick:\n")
+        self.assertIn("    permissions:\n      contents: read\n", monitor)
+        self.assertNotIn(": write", monitor)
+        self.assertIn("    permissions:\n      actions: write\n", next_tick)
+        self.assertNotIn("entry_monitor.py", next_tick)
+        self.assertNotIn("contents:", next_tick)
 
     def test_scan_step_name_matches_gap_audit(self) -> None:
         scan_steps = [line for line in active_lines() if line.strip().startswith("- name: Dry-run scan")]
@@ -56,12 +73,12 @@ class WorkflowDryRunOnlyTests(unittest.TestCase):
         self.assertIn(f"- name: {audit.SCAN_STEP_PREFIX}", scan_steps[0])
         self.assertEqual(WORKFLOW.name, audit.WORKFLOW_FILE)
 
-    def test_brussels_window_blocks_scans_from_22_to_08(self) -> None:
+    def test_brussels_window_gates_tests_and_scan(self) -> None:
         text = "\n".join(active_lines())
-        self.assertIn("TZ=Europe/Brussels date +%H", text)
-        self.assertIn('" -ge 8 ]', text)
-        self.assertIn('" -lt 22 ]', text)
-        self.assertEqual(4, text.count("if: steps.window.outputs.active == 'true'"))
+        self.assertIn("python scheduler/cadence.py", text)
+        self.assertEqual(2, text.count("if: steps.cadence.outputs.active == 'true'"))
+        self.assertIn("- name: Run tests\n        if: steps.cadence.outputs.active == 'true'", text)
+        self.assertIn("- name: Dry-run scan (OKX public candles, no Telegram, writes Step Summary)\n        if: steps.cadence.outputs.active == 'true'", text)
 
     def test_every_scanner_call_is_dry_run(self) -> None:
         calls = [line for line in active_lines() if "entry_monitor.py" in line]
@@ -83,7 +100,8 @@ class WorkflowDryRunOnlyTests(unittest.TestCase):
         self.assertIn("concurrency:", lines)
         self.assertIn("  group: ai-crypto-trader-entry-monitor", lines)
         self.assertIn("  cancel-in-progress: false", lines)
-        self.assertIn("    timeout-minutes: 5", lines)
+        self.assertIn("    timeout-minutes: 15", lines)
+        self.assertIn("    timeout-minutes: 2", lines)
 
 
 class GapAuditWorkflowTests(unittest.TestCase):
