@@ -1,0 +1,46 @@
+name: Scan Gap Audit
+
+# Read-only audit of real gaps between successful dry-run scans (FAIL if any gap > 15 min in 08:00-22:00 Brussels).
+on:
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "Local Europe/Brussels date YYYY-MM-DD (empty = today)"
+        required: false
+        default: ""
+  schedule:
+    # 21:17 UTC is after 22:00 Brussels in both CET and CEST.
+    - cron: "17 21 * * *"
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: scan-gap-audit
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Audit scan gaps
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          AUDIT_DATE: ${{ inputs.date }}
+        run: |
+          if [ -n "$AUDIT_DATE" ]; then
+            python diagnostics/scan_gap_audit.py --date "$AUDIT_DATE"
+          else
+            python diagnostics/scan_gap_audit.py
+          fi

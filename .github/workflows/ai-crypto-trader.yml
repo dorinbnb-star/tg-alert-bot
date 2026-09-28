@@ -1,12 +1,14 @@
 name: AI Crypto Trader Entry Monitor
 
 # Dry-run only: no path in this workflow reads Telegram secrets, calls Telegram or saves dedup state.
+# Primary trigger: an external cron calls workflow_dispatch every 10 minutes (see AI_CRYPTO_GITHUB_ACTIONS.md),
+# because GitHub `schedule` created 1 of ~40 expected runs on 2026-09-28. The cron below is only a fallback.
 on:
   workflow_dispatch:
   schedule:
-    # Covers 08:00-21:50 Europe/Brussels in both CET and CEST.
+    # Covers 08:00-21:55 Europe/Brussels in both CET and CEST, offset from :00 (GitHub's peak-load minute).
     # The first step applies the exact local-time gate for DST transitions.
-    - cron: "*/10 6-20 * * *"
+    - cron: "5,15,25,35,45,55 6-20 * * *"
 
 permissions:
   contents: read
