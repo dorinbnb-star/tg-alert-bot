@@ -47,22 +47,26 @@ In dry-run nu se scrie si nu se salveaza starea de deduplicare. `concurrency` nu
 
 Pe 2026-09-28, cu workflow-ul `active`, repository public si branch implicit `main`, GitHub a creat o singura rulare `schedule` (17:02:56 UTC) din aproximativ 40 de sloturi cron asteptate intre 08:46 si 18:31 UTC, iar dupa commitul 819c3b7 nu a creat rularile de la 18:40 si 18:50 UTC. Sloturile lipsa nu apar deloc in istoric (nici esuate, nici anulate, nici in coada), deci nu au fost create de planificatorul GitHub. Documentatia GitHub spune ca evenimentul `schedule` poate fi intarziat, iar unele rulari pot fi abandonate la incarcare mare, mai ales la inceputul orei. Prin urmare `schedule` nu poate garanta pauza maxima de 15 minute.
 
-### Declansator principal: cron extern gratuit catre `workflow_dispatch`
+### Declansator principal: lant auto-programat, fara PAT si fara cont extern
 
-Un serviciu cron extern apeleaza API-ul GitHub la fiecare 10 minute. `workflow_dispatch` porneste de regula in cateva secunde. Cronul GitHub `5,15,25,35,45,55 6-20 * * *` ramane ca plasa de siguranta, decalat fata de minutul `:00`. Doua scanari apropiate sunt inofensive: dry-run, fara Telegram si fara deduplicare.
+Fiecare rulare este un "tic":
 
-Configurare, facuta o singura data de proprietarul repository-ului:
+1. `scheduler/cadence.py` asteapta slotul primit de la ticul anterior (minutele `:00`, `:10`, ..., `:50`; maximum 11 minute), apoi verifica fereastra `08:00-22:00 Europe/Brussels` dupa ceasul real.
+2. Numai in fereastra ruleaza testele si scannerul `--dry-run`.
+3. Jobul separat `next-tick` (singurul cu `actions: write`) porneste urmatorul tic prin `workflow_dispatch`, cu tokenul efemer al rularii (`github.token`). GitHub permite ca `GITHUB_TOKEN` sa creeze rulari noi prin `workflow_dispatch`. Jobul ruleaza si daca scanarea a esuat, ca o eroare OKX sa nu rupa lantul.
+4. Dupa scanarea de la `21:50`, urmatorul slot (`22:00`) este in afara ferestrei, deci lantul se opreste.
 
-1. GitHub, `Settings`, `Developer settings`, `Personal access tokens`, `Fine-grained tokens`, `Generate new token`: `Repository access` = numai `dorinbnb-star/tg-alert-bot`; `Permissions`, `Actions` = `Read and write` (restul raman fara acces). Tokenul nu se pune in repository.
-2. Intr-un serviciu cron gratuit care poate trimite POST cu antete (de exemplu cron-job.org), creeaza un job:
-   - URL: `https://api.github.com/repos/dorinbnb-star/tg-alert-bot/actions/workflows/ai-crypto-trader.yml/dispatches`
-   - Metoda: `POST`
-   - Antete: `Accept: application/vnd.github+json`, `Authorization: Bearer <TOKENUL DE LA PASUL 1>`, `X-GitHub-Api-Version: 2022-11-28`, `Content-Type: application/json`
-   - Corp: `{"ref":"main"}`
-   - Program: la fiecare 10 minute (minutele 0, 10, ..., 50), orele 8-21, fus `Europe/Brussels`
-   - Raspuns asteptat: HTTP `204`
+Pornirea si repornirea: cronul `52 5,6 * * *` porneste lantul la `07:52` ora Bruxelles (vara si iarna); primul tic asteapta pana la `08:00`. Cronul `5,15,25,35,45,55 6-20 * * *` reporneste lantul daca s-a rupt. `concurrency` pastreaza o singura rulare activa si cel mult una in asteptare, deci lanturile duplicate se reduc singure la unul.
 
-Poarta `Check Brussels scan window` ramane activa, deci nici un apel extern gresit nu poate produce scanari intre `22:00` si `07:59`.
+Pe alte branchuri decat `main`, lantul continua numai pentru un numar limitat de ticuri (inputul `ticks`), folosit pentru teste.
+
+Cost si limite: repository-ul este public, deci minutele GitHub-hosted sunt gratuite. In fereastra activa, un runner asteapta pana la ~10 minute pe tic (aproximativ 14 ore de runner pe zi). Aceasta este o incarcare continua a unui runner GitHub; conditiile GitHub Actions interzic activitatile care pun pe servere o sarcina disproportionata fata de beneficiu, deci exista un risc de politica pe care proprietarul il accepta la merge.
+
+### Alternativa cu incarcare minima: cron extern cu PAT
+
+Daca riscul de mai sus nu este acceptat, un serviciu cron extern gratuit (de exemplu cron-job.org) poate trimite la fiecare 10 minute `POST https://api.github.com/repos/dorinbnb-star/tg-alert-bot/actions/workflows/ai-crypto-trader.yml/dispatches` cu corpul `{"ref":"main"}`, antetele `Accept: application/vnd.github+json`, `X-GitHub-Api-Version: 2022-11-28` si un token fine-grained limitat la acest repository, cu permisiunea `Actions: Read and write`. Necesita un cont extern si un token persistent.
+
+Poarta de fereastra din `scheduler/cadence.py` ramane activa in toate cazurile, deci nicio declansare nu poate produce scanari intre `22:00` si `07:59`.
 
 ### Audit al pauzelor reale
 
