@@ -58,6 +58,8 @@ Fiecare rulare este un "tic":
 
 Pornirea si repornirea: cronul `52 5,6 * * *` porneste lantul la `07:52` ora Bruxelles (vara si iarna); primul tic asteapta pana la `08:00`. Cronul `5,15,25,35,45,55 6-20 * * *` reporneste lantul daca s-a rupt. `concurrency` pastreaza o singura rulare activa si cel mult una in asteptare, deci lanturile duplicate se reduc singure la unul.
 
+Risc ramas: pornirea de dimineata si repornirea dupa o rupere depind de `schedule`, care pe 2026-09-28 a livrat 1 din ~40 de sloturi. Daca niciun cron nu porneste intre 07:52 si 08:15, prima scanare a zilei intarzie si auditul arata `FAIL`. O pornire manuala (`Run workflow` pe `main`) reporneste imediat lantul.
+
 Pe alte branchuri decat `main`, lantul continua numai pentru un numar limitat de ticuri (inputul `ticks`), folosit pentru teste.
 
 Cost si limite: repository-ul este public, deci minutele GitHub-hosted sunt gratuite. In fereastra activa, un runner asteapta pana la ~10 minute pe tic (aproximativ 14 ore de runner pe zi). Aceasta este o incarcare continua a unui runner GitHub; conditiile GitHub Actions interzic activitatile care pun pe servere o sarcina disproportionata fata de beneficiu, deci exista un risc de politica pe care proprietarul il accepta la merge.
