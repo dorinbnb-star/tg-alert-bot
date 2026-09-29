@@ -119,11 +119,37 @@ class RunParsingTests(unittest.TestCase):
         runs_call = calls[0]
         self.assertEqual("/repos/owner/repo/actions/workflows/ai-crypto-trader.yml/runs", runs_call[0])
         self.assertEqual("main", runs_call[1]["branch"])
-        self.assertEqual("2026-09-27T22:00:00Z..2026-09-28T22:00:00Z", runs_call[1]["created"])
+        self.assertEqual("2026-09-27T10:00:00Z..2026-09-28T22:00:00Z", runs_call[1]["created"])
         self.assertEqual(
             ["/repos/owner/repo/actions/runs/1/jobs", "/repos/owner/repo/actions/runs/2/jobs"],
             [path for path, _ in calls[1:]],
         )
+
+    def test_first_morning_scan_from_overnight_run_created_previous_evening_is_counted(self) -> None:
+        runs = {"workflow_runs": [
+            {"id": 10, "event": "workflow_dispatch", "status": "completed", "conclusion": "success", "created_at": "2026-09-27T19:40:40Z"},
+            {"id": 11, "event": "workflow_dispatch", "status": "completed", "conclusion": "success", "created_at": "2026-09-27T19:51:00Z"},
+            {"id": 12, "event": "workflow_dispatch", "status": "completed", "conclusion": "success", "created_at": "2026-09-28T06:01:40Z"},
+        ]}
+        completed = {10: "2026-09-27T19:50:45Z", 11: "2026-09-28T06:01:31Z", 12: "2026-09-28T06:10:44Z"}
+
+        def fake_get(path: str, params: dict, token: str | None) -> dict:
+            if path.endswith("/runs"):
+                low, high = (audit.parse_timestamp(bound) for bound in params["created"].split(".."))
+                return {"workflow_runs": [
+                    run for run in runs["workflow_runs"] if low <= audit.parse_timestamp(run["created_at"]) <= high
+                ]}
+            run_id = int(path.split("/runs/")[1].split("/")[0])
+            return {"jobs": [{"steps": [{"name": "Dry-run scan (OKX)", "conclusion": "success", "completed_at": completed[run_id]}]}]}
+
+        with patch.object(audit, "api_get", side_effect=fake_get):
+            scans, rows = audit.collect("owner/repo", SUMMER_DAY, "main", None)
+        self.assertIn(utc("2026-09-28T06:01:31"), scans)
+        self.assertEqual([11, 12], [row["run_id"] for row in rows])
+        report = audit.evaluate(scans, SUMMER_DAY, utc("2026-09-28T06:11:00"))
+        self.assertEqual("PASS", report["verdict"])
+        self.assertEqual(2, report["successful_scans_in_window"])
+        self.assertEqual([], report["scans_outside_window"])
 
 
 if __name__ == "__main__":

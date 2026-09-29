@@ -22,6 +22,9 @@ DEFAULT_MAX_GAP_MINUTES = 15
 WORKFLOW_FILE = "ai-crypto-trader.yml"
 SCAN_STEP_PREFIX = "Dry-run scan"
 API_BASE = "https://api.github.com"
+# A tick's run is created before its wait timer; the longest (overnight) wait is 670 min, so the first
+# morning scan belongs to a run created the previous evening.
+RUN_LOOKBACK = timedelta(hours=12)
 DEFAULT_REPOSITORY = "dorinbnb-star/tg-alert-bot"
 
 
@@ -117,7 +120,7 @@ def api_get(path: str, params: dict, token: str | None) -> dict:
 
 def fetch_runs(repository: str, day: date, branch: str, token: str | None) -> list[dict]:
     day_start, day_end, _, _ = local_bounds(day)
-    created = f"{day_start:%Y-%m-%dT%H:%M:%SZ}..{day_end:%Y-%m-%dT%H:%M:%SZ}"
+    created = f"{day_start - RUN_LOOKBACK:%Y-%m-%dT%H:%M:%SZ}..{day_end:%Y-%m-%dT%H:%M:%SZ}"
     runs: list[dict] = []
     page = 1
     while True:
@@ -134,6 +137,7 @@ def fetch_runs(repository: str, day: date, branch: str, token: str | None) -> li
 
 
 def collect(repository: str, day: date, branch: str, token: str | None) -> tuple[list[datetime], list[dict]]:
+    day_start, day_end, _, _ = local_bounds(day)
     scans: list[datetime] = []
     rows: list[dict] = []
     for run in fetch_runs(repository, day, branch, token):
@@ -143,10 +147,14 @@ def collect(repository: str, day: date, branch: str, token: str | None) -> tuple
             scanned_at = scan_completed_at(jobs.get("jobs") or [])
         if scanned_at is not None:
             scans.append(scanned_at)
+        created_at = parse_timestamp(run["created_at"])
+        belongs_to_day = day_start <= created_at < day_end or (scanned_at is not None and day_start <= scanned_at < day_end)
+        if not belongs_to_day:
+            continue
         rows.append({
             "run_id": run.get("id"),
             "event": run.get("event"),
-            "created_at": local_iso(parse_timestamp(run["created_at"])),
+            "created_at": local_iso(created_at),
             "conclusion": run.get("conclusion") or run.get("status"),
             "scan_completed_at": local_iso(scanned_at) if scanned_at else None,
         })
