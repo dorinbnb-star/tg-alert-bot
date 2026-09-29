@@ -54,7 +54,7 @@ class ChainSimulationTests(unittest.TestCase):
         return waits
 
     def test_normal_cest_days_scan_every_ten_minutes_and_sleep_once_per_night(self) -> None:
-        for overhead in (30, 45, 75):
+        for overhead in (20, 30, 45, 75):
             waits = self.run_nights(
                 "2026-09-28T06:00:40", "2026-09-30T20:05:00",
                 [("2026-09-28", 2), ("2026-09-29", 2), ("2026-09-30", 2)], overhead,

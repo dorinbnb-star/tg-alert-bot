@@ -31,6 +31,7 @@ def dispatch(
     *,
     opener: Callable = urllib.request.urlopen,
     sleeper: Callable[[float], None] = time.sleep,
+    log: Callable[[str], None] = print,
 ) -> int:
     request = urllib.request.Request(
         f"{API_BASE}/repos/{repository}/actions/workflows/{workflow}/dispatches",
@@ -59,7 +60,7 @@ def dispatch(
         except (urllib.error.URLError, TimeoutError) as exc:
             last_error = f"eroare retea {type(exc).__name__}"
         if attempt <= len(RETRY_DELAYS):
-            print(f"Dispatch incercarea {attempt} esuata ({last_error}); reincerc in {RETRY_DELAYS[attempt - 1]}s")
+            log(f"Dispatch incercarea {attempt} esuata ({last_error}); reincerc in {RETRY_DELAYS[attempt - 1]}s")
             sleeper(RETRY_DELAYS[attempt - 1])
     raise DispatchError(f"Dispatch esuat dupa {len(RETRY_DELAYS) + 1} incercari: {last_error}")
 

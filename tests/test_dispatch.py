@@ -49,7 +49,7 @@ class DispatchTests(unittest.TestCase):
         opener, slept = Opener(outcomes), []
         attempts = dispatch.dispatch(
             "owner/repo", "ai-crypto-trader.yml", "main", INPUTS, TOKEN,
-            opener=opener, sleeper=slept.append,
+            opener=opener, sleeper=slept.append, log=lambda _: None,
         )
         return attempts, opener, slept
 
@@ -81,7 +81,10 @@ class DispatchTests(unittest.TestCase):
     def test_retries_are_exhausted_and_error_never_contains_token(self) -> None:
         opener, slept = Opener([http_error(502)] * 4), []
         with self.assertRaises(dispatch.DispatchError) as caught:
-            dispatch.dispatch("owner/repo", "ai-crypto-trader.yml", "main", INPUTS, TOKEN, opener=opener, sleeper=slept.append)
+            dispatch.dispatch(
+                "owner/repo", "ai-crypto-trader.yml", "main", INPUTS, TOKEN,
+                opener=opener, sleeper=slept.append, log=lambda _: None,
+            )
         self.assertEqual(4, len(opener.requests))
         self.assertEqual([5, 15, 30], slept)
         self.assertIn("HTTP 502", str(caught.exception))
