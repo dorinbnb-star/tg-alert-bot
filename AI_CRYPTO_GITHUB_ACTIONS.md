@@ -39,7 +39,7 @@ Rularea manuala si cea programata nu citesc secretele si nu pot trimite Telegram
 
 ## Deduplicare
 
-In dry-run nu se scrie si nu se salveaza starea de deduplicare. `concurrency` nu permite doua scanari simultane.
+In dry-run nu se scrie si nu se salveaza starea de deduplicare. `concurrency` (grupul `ai-crypto-trader-entry-monitor-${{ github.ref }}`) nu permite doua scanari simultane pe acelasi branch.
 
 ## Programare
 
@@ -67,7 +67,7 @@ Environments de creat in `Settings` > `Environments` (nume exacte; fara secrete,
 | `scan-overnight-610m` | 610 | noapte normala |
 | `scan-overnight-670m` | 670 | noaptea trecerii la ora de iarna |
 
-Pornirea si recuperarea: cronul `52 5,6 * * *` (07:52 ora Bruxelles, vara si iarna) si cronul rar `7 6-20 * * *` (o data pe ora) pornesc lantul daca nu exista. `concurrency` pastreaza o singura rulare activa si cel mult una in asteptare, deci un cron care porneste in timp ce lantul este viu este anulat de urmatorul tic. Daca pornirea de dimineata ratata nu este acoperita de cron, un `Run workflow` manual pe `main` reporneste lantul.
+Pornirea si recuperarea: cronul `52 5,6 * * *` (07:52 ora Bruxelles, vara si iarna) si cronul rar `7 6-20 * * *` (o data pe ora) pornesc lantul daca nu exista. `concurrency` pastreaza, pentru fiecare branch, o singura rulare activa si cel mult una in asteptare, deci un cron care porneste in timp ce lantul este viu este anulat de urmatorul tic. Grupul este izolat pe ref (`${{ github.ref }}`), astfel incat un lant de demonstratie pe alt branch nu poate anula sau intarzia o rulare de pe `main`, si invers. Daca pornirea de dimineata ratata nu este acoperita de cron, un `Run workflow` manual pe `main` reporneste lantul.
 
 Pe alte branchuri decat `main`, lantul continua numai pentru un numar limitat de ticuri (inputul `ticks`), folosit pentru demonstratii.
 

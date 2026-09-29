@@ -133,7 +133,8 @@ class WorkflowDryRunOnlyTests(unittest.TestCase):
         lines = active_lines()
         self.assertEqual(["contents: read"], permission_lines(lines))
         self.assertIn("concurrency:", lines)
-        self.assertIn("  group: ai-crypto-trader-entry-monitor", lines)
+        self.assertIn("  group: ai-crypto-trader-entry-monitor-${{ github.ref }}", lines)
+        self.assertEqual(1, sum(1 for line in lines if line.strip().startswith("group:")))
         self.assertIn("  cancel-in-progress: false", lines)
         self.assertIn("    timeout-minutes: 5", lines)
 

@@ -28,7 +28,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: ai-crypto-trader-entry-monitor
+  # Isolated per ref: a proof chain on another branch can never cancel or delay a pending tick on main.
+  group: ai-crypto-trader-entry-monitor-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
