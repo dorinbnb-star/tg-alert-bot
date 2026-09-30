@@ -20,7 +20,7 @@ WINDOW_START = time(8, 0)
 WINDOW_END = time(22, 0)
 DEFAULT_MAX_GAP_MINUTES = 15
 WORKFLOW_FILE = "ai-crypto-trader.yml"
-SCAN_STEP_PREFIX = "Dry-run scan"
+SCAN_STEP_PREFIXES = ("Dry-run scan", "Live scan")
 API_BASE = "https://api.github.com"
 # A tick's run is created before its wait timer; the longest (overnight) wait is 670 min, so the first
 # morning scan belongs to a run created the previous evening.
@@ -52,7 +52,7 @@ def scan_completed_at(jobs: list[dict]) -> datetime | None:
     for job in jobs:
         for step in job.get("steps") or []:
             if (
-                str(step.get("name", "")).startswith(SCAN_STEP_PREFIX)
+                str(step.get("name", "")).startswith(SCAN_STEP_PREFIXES)
                 and step.get("conclusion") == "success"
                 and step.get("completed_at")
             ):

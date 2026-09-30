@@ -26,6 +26,10 @@ FORBIDDEN = (
     "actions/cache",
     "alert_sent",
 )
+NEVER = ("api.telegram.org", "--env-file", "verify-telegram", "test-telegram", "sleep")
+LIVE_PATH = "github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.triggering_actor == 'github-actions[bot]')"
+LIVE_STEP = "Live scan (OKX public candles, Telegram only on NOW=ENTER, writes Step Summary)"
+DRY_STEP = "Dry-run scan (OKX public candles, no Telegram, writes Step Summary)"
 
 
 def active_lines(path: Path = WORKFLOW) -> list[str]:
@@ -37,6 +41,11 @@ def jobs(path: Path = WORKFLOW) -> dict[str, str]:
     body = "\n".join(active_lines(path)).split("\njobs:\n", 1)[1]
     parts = re.split(r"^  ([a-z-]+):$", body, flags=re.MULTILINE)
     return {parts[index]: parts[index + 1] + "\n" for index in range(1, len(parts), 2)}
+
+
+def monitor_steps() -> dict[str, str]:
+    parts = jobs()["monitor"].split("\n      - name: ")[1:]
+    return {part.split("\n", 1)[0]: part for part in parts}
 
 
 def permission_lines(lines: list[str]) -> list[str]:
@@ -102,31 +111,69 @@ class WorkflowDryRunOnlyTests(unittest.TestCase):
         for minutes, name in cadence.WAIT_ENVIRONMENTS.items():
             self.assertIn(f"| `{name}` | {minutes} |", docs)
 
-    def test_scan_step_name_matches_gap_audit(self) -> None:
-        scan_steps = [line for line in active_lines() if line.strip().startswith("- name: Dry-run scan")]
-        self.assertEqual(1, len(scan_steps))
-        self.assertIn(f"- name: {audit.SCAN_STEP_PREFIX}", scan_steps[0])
+    def test_scan_step_names_match_gap_audit(self) -> None:
+        scans = [name for name in monitor_steps() if name.startswith(audit.SCAN_STEP_PREFIXES)]
+        self.assertEqual([DRY_STEP, LIVE_STEP], scans)
         self.assertEqual(WORKFLOW.name, audit.WORKFLOW_FILE)
 
-    def test_brussels_window_gates_tests_and_scan(self) -> None:
+    def test_brussels_window_gates_tests_and_both_scan_paths(self) -> None:
+        steps = monitor_steps()
+        self.assertIn("python scheduler/cadence.py", steps["Plan next tick and check Brussels scan window"])
+        self.assertIn("if: steps.cadence.outputs.active == 'true'\n", steps["Run tests"])
+        for name in (DRY_STEP, "Restore persistent dedup state", LIVE_STEP):
+            self.assertIn("if: ${{ steps.cadence.outputs.active == 'true' && ", steps[name], name)
+
+    def test_dry_run_and_live_paths_are_mutually_exclusive(self) -> None:
+        steps = monitor_steps()
+        self.assertIn(f"if: ${{{{ steps.cadence.outputs.active == 'true' && !({LIVE_PATH}) }}}}\n", steps[DRY_STEP])
+        self.assertIn(f"if: ${{{{ steps.cadence.outputs.active == 'true' && {LIVE_PATH} }}}}\n", steps[LIVE_STEP])
+        self.assertIn(f"if: ${{{{ steps.cadence.outputs.active == 'true' && {LIVE_PATH} }}}}\n", steps["Restore persistent dedup state"])
+
+    def test_dry_run_path_never_sees_secrets_or_sends(self) -> None:
+        dry = monitor_steps()[DRY_STEP]
+        self.assertIn('entry_monitor.py scan --root "$GITHUB_WORKSPACE" --dry-run', dry)
+        for fragment in ("secrets.", "TELEGRAM", "--send", "env:"):
+            self.assertNotIn(fragment, dry)
+
+    def test_only_the_live_step_reads_exactly_the_two_telegram_secrets(self) -> None:
         text = "\n".join(active_lines())
-        self.assertIn("python scheduler/cadence.py", text)
-        self.assertEqual(2, text.count("if: steps.cadence.outputs.active == 'true'"))
-        self.assertIn("- name: Run tests\n        if: steps.cadence.outputs.active == 'true'", text)
-        self.assertIn("- name: Dry-run scan (OKX public candles, no Telegram, writes Step Summary)\n        if: steps.cadence.outputs.active == 'true'", text)
+        live = monitor_steps()[LIVE_STEP]
+        self.assertEqual(
+            ["secrets.TELEGRAM_TOKEN", "secrets.TELEGRAM_CHAT_ID"],
+            re.findall(r"secrets\.[A-Z_]+", text),
+        )
+        self.assertIn("TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}", live)
+        self.assertIn("TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}", live)
+        self.assertIn('entry_monitor.py scan --root "$GITHUB_WORKSPACE" --send', live)
+        self.assertEqual(1, text.count("--send"))
+        for name in ("wait", "next-tick"):
+            self.assertNotIn("secrets.", jobs()[name], name)
 
-    def test_every_scanner_call_is_dry_run(self) -> None:
-        calls = [line for line in active_lines() if "entry_monitor.py" in line]
-        self.assertEqual(1, len(calls))
-        self.assertIn(" scan ", calls[0])
-        self.assertIn("--dry-run", calls[0])
+    def test_every_scanner_call_is_a_scan_in_dry_run_or_live_mode(self) -> None:
+        calls = [line.strip() for line in active_lines() if "entry_monitor.py" in line]
+        self.assertEqual(
+            [
+                'run: python ai_crypto_monitor/entry_monitor.py scan --root "$GITHUB_WORKSPACE" --dry-run',
+                'run: python ai_crypto_monitor/entry_monitor.py scan --root "$GITHUB_WORKSPACE" --send',
+            ],
+            calls,
+        )
 
-    def test_no_step_is_limited_to_one_trigger(self) -> None:
-        self.assertFalse([line for line in active_lines() if "github.event_name" in line])
+    def test_dedup_state_is_restored_and_saved_only_on_the_live_path(self) -> None:
+        steps = monitor_steps()
+        restore, save = steps["Restore persistent dedup state"], steps["Save dedup state after Telegram accepted an alert"]
+        self.assertIn("uses: actions/cache/restore@v4", restore)
+        self.assertIn("restore-keys: |\n            ai-crypto-dedup-${{ github.ref_name }}-", restore)
+        self.assertIn("if: ${{ always() && steps.live.outputs.alert_sent == 'true' }}", save)
+        self.assertIn("uses: actions/cache/save@v4", save)
+        for body in (restore, save):
+            self.assertIn("path: ai_crypto_monitor/state/dedup.json", body)
+            self.assertIn("key: ai-crypto-dedup-${{ github.ref_name }}-${{ github.run_id }}", body)
+        self.assertIn("id: live\n", steps[LIVE_STEP])
 
-    def test_no_telegram_secrets_or_dedup_persistence(self) -> None:
+    def test_never_calls_telegram_directly_or_uses_local_credentials(self) -> None:
         text = "\n".join(active_lines())
-        for fragment in FORBIDDEN:
+        for fragment in NEVER:
             self.assertNotIn(fragment, text)
 
     def test_read_only_permissions_concurrency_and_timeout(self) -> None:

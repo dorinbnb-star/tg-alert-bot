@@ -17,9 +17,11 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
+from zoneinfo import ZoneInfo
 
 
 LOGGER = logging.getLogger("entry-monitor")
+BRUSSELS = ZoneInfo("Europe/Brussels")
 OKX_BASE_URL = "https://www.okx.com"
 OKX_BARS = {"15": "15m", "60": "1H", "240": "4H"}
 OKX_HEADERS = {"Accept": "application/json", "User-Agent": "ai-crypto-trader-diagnostic/1.0"}
@@ -36,6 +38,10 @@ class MonitorError(RuntimeError):
 
 class TelegramError(MonitorError):
     pass
+
+
+class EntrySkipped(MonitorError):
+    """A confirmed setup that is no longer actionable (expired or price drifted); never alerted."""
 
 
 @dataclass(frozen=True)
@@ -74,6 +80,14 @@ class EntrySignal:
     expires_at_ms: int
     confluence_score: int
     probability: str
+    context_close: float = 0.0
+    context_ema50: float = 0.0
+    context_ema200: float = 0.0
+    structure_close: float = 0.0
+    structure_ema50: float = 0.0
+    sweep_depth_percent: float = 0.0
+    reentry_level: float = 0.0
+    min_rr: float = 0.0
 
     @property
     def signature(self) -> str:
@@ -416,14 +430,23 @@ def pivots(candles: list[Candle], side: int) -> list[Pivot]:
     return found
 
 
-def market_bias(context: list[Candle], structure: list[Candle]) -> str | None:
+def bias_snapshot(context: list[Candle], structure: list[Candle]) -> dict[str, float]:
     context_closes = [candle.close for candle in context]
     structure_closes = [candle.close for candle in structure]
-    context_50, context_200 = ema(context_closes, 50), ema(context_closes, 200)
-    structure_50 = ema(structure_closes, 50)
-    if context_closes[-1] > context_50 > context_200 and structure_closes[-1] > structure_50:
+    return {
+        "context_close": context_closes[-1],
+        "context_ema50": ema(context_closes, 50),
+        "context_ema200": ema(context_closes, 200),
+        "structure_close": structure_closes[-1],
+        "structure_ema50": ema(structure_closes, 50),
+    }
+
+
+def market_bias(context: list[Candle], structure: list[Candle]) -> str | None:
+    snap = bias_snapshot(context, structure)
+    if snap["context_close"] > snap["context_ema50"] > snap["context_ema200"] and snap["structure_close"] > snap["structure_ema50"]:
         return "LONG"
-    if context_closes[-1] < context_50 < context_200 and structure_closes[-1] < structure_50:
+    if snap["context_close"] < snap["context_ema50"] < snap["context_ema200"] and snap["structure_close"] < snap["structure_ema50"]:
         return "SHORT"
     return None
 
@@ -510,6 +533,10 @@ def detect_entry(
                         expires_at_ms=confirmation_end + int(config["entry_valid_seconds"]) * 1000,
                         confluence_score=81,
                         probability=config["probability_label"],
+                        sweep_depth_percent=depth * 100,
+                        reentry_level=reentry.high if direction == "LONG" else reentry.low,
+                        min_rr=min_rr,
+                        **bias_snapshot(context, structure),
                     )
     return None
 
@@ -533,31 +560,63 @@ def fetch_closed_market(client: OkxClient, config: dict) -> tuple[int, dict[str,
 def final_entry_check(client: OkxClient, signal: EntrySignal, config: dict) -> tuple[int, float]:
     now_ms = client.server_time_ms()
     if now_ms > signal.expires_at_ms:
-        raise MonitorError("Semnal expirat inainte de trimitere")
+        raise EntrySkipped("Semnal expirat inainte de trimitere")
     age_ms = now_ms - signal.confirmation_end_ms
     if age_ms < 0 or age_ms > int(config["entry_valid_seconds"]) * 1000:
-        raise MonitorError("Confirmarea nu mai este proaspata")
+        raise EntrySkipped("Confirmarea nu mai este proaspata")
     price = client.last_price(signal.symbol)
     drift = abs(price - signal.entry) / signal.entry * 100
     if drift > float(config["maximum_entry_drift_percent"]):
-        raise MonitorError(f"Pretul s-a deplasat prea mult: drift={drift:.3f}%")
+        raise EntrySkipped(f"Pretul s-a deplasat prea mult: drift={drift:.3f}%")
     return now_ms, price
 
 
+def price(value: float) -> str:
+    return f"{value:,.2f}"
+
+
+def local_hm(milliseconds: int) -> str:
+    return datetime.fromtimestamp(milliseconds / 1000, tz=BRUSSELS).strftime("%H:%M")
+
+
 def format_entry_alert(signal: EntrySignal, live_price: float) -> str:
-    return (
-        f"ENTRY CONFIRMAT - {signal.symbol} {signal.direction}\n"
-        f"Entry confirmare: {signal.entry:,.2f}\n"
-        f"Pret verificat: {live_price:,.2f}\n"
-        f"SL structural: {signal.stop:,.2f}\n"
-        f"TP structural: {signal.target:,.2f}\n"
-        f"R:R: {signal.rr:.2f}R\n"
-        f"Confirmare 15m inchisa: {utc_iso(signal.confirmation_end_ms)}\n"
-        f"Expira: {utc_iso(signal.expires_at_ms)}\n"
-        f"Scor confluenta: {signal.confluence_score}/100 (nu este probabilitate)\n"
-        f"Probabilitate: {signal.probability}\n"
-        "Date: OKX OHLC inchis 4H/1H/15m. Fara heatmap/OI/CVD. Decizie manuala."
-    )
+    long = signal.direction == "LONG"
+    above = ">" if long else "<"
+    drift = abs(live_price - signal.entry) / signal.entry * 100
+    pro = [
+        f"4H close {price(signal.context_close)} {above} EMA50 {price(signal.context_ema50)} {above} EMA200 {price(signal.context_ema200)}",
+        f"1H close {price(signal.structure_close)} {above} EMA50 {price(signal.structure_ema50)}",
+        f"sweep {signal.sweep_depth_percent:.2f}% {'sub' if long else 'peste'} pivotul 1H, apoi reintrare",
+        f"R:R {signal.rr:.2f} >= minim {signal.min_rr:.2f}",
+    ]
+    contra = [
+        "fara OI/CVD/heatmap; doar OHLC",
+        "TP = primul pivot 1H opus, poate fi atins partial",
+    ]
+    if signal.rr < signal.min_rr + 0.5:
+        contra.append("R:R aproape de minim")
+    if drift >= 0.05:
+        contra.append(f"pretul s-a miscat {drift:.2f}% de la confirmare")
+    probability = signal.probability.strip().upper()
+    probability_line = "Probabilitate: necalibrata" if probability in {"", "NECALIBRATA", "UNCALIBRATED"} else f"Probabilitate: {signal.probability}"
+    return "\n".join([
+        f"NOW=ENTER {signal.direction} {signal.symbol}",
+        f"BIAS: {signal.direction} (trend 4H si 1H {'peste' if long else 'sub'} EMA50)",
+        f"SETUP: sweep {'low' if long else 'high'} 1H {price(signal.reference_level)} + reintrare + confirmare 15m",
+        (
+            f"TRIGGER: lumanarea 15m {local_hm(signal.confirmation_start_ms)}-{local_hm(signal.confirmation_end_ms)} "
+            f"(Bruxelles) a inchis la {price(signal.entry)}, {'peste maximul' if long else 'sub minimul'} "
+            f"lumanarii de reintrare {price(signal.reentry_level)}"
+        ),
+        f"Entry: {price(signal.entry)} (pret verificat {price(live_price)})",
+        f"SL / invalidare: {price(signal.stop)} ({'sub' if long else 'peste'} extremul sweep {price(signal.sweep_extreme)})",
+        f"TP: {price(signal.target)}",
+        f"R:R: {signal.rr:.2f}",
+        "Pro: " + "; ".join(pro),
+        "Contra: " + "; ".join(contra),
+        f"Valabil pana la {local_hm(signal.expires_at_ms)} (Bruxelles). {probability_line}.",
+        "Date: OKX, lumanari inchise 4H/1H/15m. Doar alerta, fara ordine automate.",
+    ])
 
 
 def scan_symbol(
@@ -573,7 +632,10 @@ def scan_symbol(
     signal = detect_entry(series["context"], series["structure"], series["trigger"], rules, config)
     if signal is None:
         return {"status": "NO_ENTRY", "detected_at": utc_iso(detected_at_ms)}
-    checked_at_ms, live_price = final_entry_check(client, signal, config)
+    try:
+        checked_at_ms, live_price = final_entry_check(client, signal, config)
+    except EntrySkipped as exc:
+        return {"status": "ENTRY_SKIPPED", "reason": str(exc), "signature": signal.signature[:12]}
     if dedup.contains(signal.signature, checked_at_ms):
         return {"status": "DUPLICATE", "signature": signal.signature[:12]}
     message = format_entry_alert(signal, live_price)
@@ -625,6 +687,8 @@ def scan_once(
         status = "ENTRY_READY_DRY_RUN"
     elif "DUPLICATE" in statuses:
         status = "DUPLICATE"
+    elif "ENTRY_SKIPPED" in statuses:
+        status = "ENTRY_SKIPPED"
     else:
         status = "NO_ENTRY"
     return {"status": status, "results": results}
@@ -710,8 +774,11 @@ def main(argv: list[str] | None = None) -> int:
             env_file = args.env_file.resolve() if args.env_file else None
             token, chat_id = credentials(env_file)
             config = read_json(package_dir(root) / "config-v0.1.json")
-            require_delivery_identity(root, token, chat_id, config)
-            sender = lambda message: telegram_call(token, "sendMessage", {"chat_id": chat_id, "text": message})
+
+            def sender(message: str) -> None:
+                # Identity is checked only when a confirmed alert is about to be sent, so quiet ticks make no Telegram calls.
+                require_delivery_identity(root, token, chat_id, config)
+                telegram_call(token, "sendMessage", {"chat_id": chat_id, "text": message})
         client = OkxClient()
         if args.command == "scan":
             result = scan_once(root, client, dry_run, sender)

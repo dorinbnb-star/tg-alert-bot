@@ -19,8 +19,11 @@ BRUSSELS = ZoneInfo("Europe/Brussels")
 WINDOW_START = time(8, 0)
 WINDOW_END = time(22, 0)
 GRID = timedelta(minutes=10)
-# Typical time from this planner to the successor's scan, excluding the wait timer (dispatch, runner pickup, setup).
-OVERHEAD = timedelta(seconds=45)
+# Scans target :x0:45, just after the :00/:30 15m closes (and ~5m45s after :15/:45), so every confirmation is seen
+# within the scanner's entry validity window; it also keeps the last evening scan after 21:50 for a clean 08:00 landing.
+GRID_PHASE = timedelta(seconds=45)
+# Measured time from this planner to the successor's scan, excluding the wait timer (dispatch, runner pickup, setup).
+OVERHEAD = timedelta(seconds=25)
 LANDING_MARGIN = timedelta(seconds=30)
 LANDING_TOLERANCE = timedelta(minutes=11)
 EARLY_TOLERANCE = timedelta(seconds=30)
@@ -46,13 +49,13 @@ def arrival(now: datetime, minutes: int) -> datetime:
 
 
 def grid_distance(moment: datetime) -> float:
-    offset = moment.timestamp() % GRID.total_seconds()
+    offset = (moment.timestamp() - GRID_PHASE.total_seconds()) % GRID.total_seconds()
     return min(offset, GRID.total_seconds() - offset)
 
 
 def nearest_slot(moment: datetime) -> datetime:
-    step = GRID.total_seconds()
-    return datetime.fromtimestamp(round(moment.timestamp() / step) * step, tz=timezone.utc)
+    step, phase = GRID.total_seconds(), GRID_PHASE.total_seconds()
+    return datetime.fromtimestamp(round((moment.timestamp() - phase) / step) * step + phase, tz=timezone.utc)
 
 
 def choose_wait(now: datetime) -> int:
