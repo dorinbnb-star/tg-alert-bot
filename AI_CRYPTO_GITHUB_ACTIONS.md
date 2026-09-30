@@ -2,9 +2,16 @@
 
 Workflow: `.github/workflows/ai-crypto-trader.yml`.
 
-## Stare curenta: dry-run automat
+## Stare curenta: alerte Telegram doar pentru ENTRY confirmat
 
-Workflow-ul este declansat la fiecare 10 minute (vezi `Programare`) si ruleaza scannerul numai intre `08:00` inclusiv si `22:00` exclusiv in fusul `Europe/Brussels`. Poarta de timp foloseste direct fusul local, deci trecerea CET/CEST este automata. In intervalul `22:00-07:59` nu se ruleaza testele si nu se apeleaza OKX; se face doar checkout pentru planificatorul `scheduler/cadence.py`. Atat calea programata (`schedule`), cat si cea manuala (`workflow_dispatch`) raman `--dry-run`. Nicio cale a workflow-ului nu citeste `TELEGRAM_TOKEN`/`TELEGRAM_CHAT_ID`, nu apeleaza Telegram, nu salveaza deduplicarea si nu trimite notificari. Rezultatul fiecarei scanari apare in GitHub Step Summary. Testul `tests/test_workflow.py` verifica aceste reguli la fiecare rulare activa.
+Workflow-ul este declansat la fiecare 10 minute (vezi `Programare`) si ruleaza scannerul numai intre `08:00` inclusiv si `22:00` exclusiv in fusul `Europe/Brussels`. In intervalul `22:00-07:59` nu se ruleaza testele si nu se apeleaza OKX; se face doar checkout pentru planificatorul `scheduler/cadence.py`.
+
+Doua cai, care se exclud reciproc:
+
+- **Live** (pasul `Live scan`): numai pe `main` si numai pentru ticurile pornite de `schedule` sau de lantul insusi (`github-actions[bot]`). Este singurul pas care citeste secretele `TELEGRAM_TOKEN` si `TELEGRAM_CHAT_ID` si singurul care ruleaza `--send`. Trimite pe Telegram numai cand exista `NOW=ENTER` cu setup complet confirmat; pentru `NO_ENTRY`, setup neconfirmat, semnal expirat sau duplicat nu trimite nimic. Nu exista mesaje WATCH, startup, heartbeat, periodice sau de eroare.
+- **Dry-run** (pasul `Dry-run scan`): orice `Run workflow` manual, orice re-run pornit de o persoana si orice alt branch. Nu vede secretele si nu poate trimite.
+
+Rezultatul fiecarei scanari apare in GitHub Step Summary. Testele `tests/test_workflow.py` si `tests/test_alert_path.py` verifica aceste reguli la fiecare tic activ.
 
 Scannerul:
 
@@ -13,33 +20,41 @@ Scannerul:
 - foloseste context 4H, structura 1H si ultima lumanare 15m inchisa pentru trigger; lumanarile OKX cu `confirm != "1"` sunt excluse;
 - scrie rezultatul fiecarei rulari (inclusiv `NO_ENTRY` si erorile) in GitHub Step Summary, nu in Telegram;
 - cere sweep, revenire, confirmare, Entry, SL structural, TP structural si R:R minim;
-- respinge date incomplete, vechi sau semnale expirate;
-- nu trimite WATCH, startup, raport periodic sau mesaj `NO_ENTRY`;
-- pastreaza `Probabilitate: NECALIBRATA` si nu deschide ordine.
+- respinge date incomplete sau vechi; un setup confirmat care a expirat (peste `entry_valid_seconds` = 420 s de la inchiderea lumanarii de confirmare) sau al carui pret a deviat peste 0,15% este sarit silentios (`ENTRY_SKIPPED`);
+- nu executa ordine si nu apeleaza niciun endpoint de ordine; foloseste doar endpointuri publice de piata OKX.
+
+Formatul alertei (exemplu sintetic din teste, nu semnal real):
+
+```
+NOW=ENTER LONG BTC-USDT-SWAP
+BIAS: LONG (trend 4H si 1H peste EMA50)
+SETUP: sweep low 1H <nivel pivot> + reintrare + confirmare 15m
+TRIGGER: lumanarea 15m HH:MM-HH:MM (Bruxelles) a inchis la <pret>, peste maximul lumanarii de reintrare <nivel>
+Entry: <pret> (pret verificat <pret live>)
+SL / invalidare: <nivel> (sub extremul sweep <nivel>)
+TP: <primul pivot 1H opus>
+R:R: <valoare>
+Pro: <EMA 4H/1H, adancime sweep, R:R>
+Contra: <limitari: fara OI/CVD/heatmap, TP partial, R:R aproape de minim, drift>
+Valabil pana la HH:MM (Bruxelles). Probabilitate: necalibrata.
+Date: OKX, lumanari inchise 4H/1H/15m. Doar alerta, fara ordine automate.
+```
+
+Nu exista calibrare a probabilitatii pe date istorice; alerta spune explicit `Probabilitate: necalibrata` si nu afiseaza scoruri ca probabilitati.
 
 ## Secrete GitHub
 
-Workflow-ul actual nu foloseste secrete. Pasii de mai jos sunt necesari numai pentru o viitoare cale de trimitere, care nu exista inca. Nu incarca `.env`. In repository-ul GitHub:
+Calea live citeste exact doua secrete de repository: `TELEGRAM_TOKEN` si `TELEGRAM_CHAT_ID`. Daca lipseste oricare, pasul `Live scan` esueaza inainte de orice apel de retea (fail closed) si nu trimite nimic; valorile nu sunt afisate niciodata. Inainte de o trimitere, scannerul verifica si ca botul are username-ul din `expected_bot_username` si ca destinatia este un chat privat.
 
-1. Deschide `Settings`.
-2. Alege `Secrets and variables` -> `Actions`.
-3. In `Repository secrets`, apasa `New repository secret`.
-4. Creeaza exact `TELEGRAM_TOKEN` cu tokenul botului.
-5. Creeaza exact `TELEGRAM_CHAT_ID` cu ID-ul chatului privat.
-
-Valorile nu trebuie introduse in Variables, fisiere, workflow, loguri sau commit-uri.
+Secretele se creeaza in `Settings` > `Secrets and variables` > `Actions` > `Repository secrets`, cu numele exacte de mai sus. Valorile nu se pun in Variables, fisiere, workflow, loguri sau commit-uri.
 
 ## Dry-run manual
 
-1. Deschide tabul `Actions`.
-2. Selecteaza `AI Crypto Trader Entry Monitor`.
-3. Apasa `Run workflow`.
-
-Rularea manuala si cea programata nu citesc secretele si nu pot trimite Telegram. Un rezultat `NO_ENTRY` este succes si ramane fara notificare. O eroare tehnica (date OKX lipsa, vechi sau HTTP) face rularea rosie.
+`Actions` > `AI Crypto Trader Entry Monitor` > `Run workflow`. Rularea manuala foloseste pasul `Dry-run scan`, nu vede secretele si nu poate trimite Telegram. Pe `main`, rularea manuala porneste si succesorul lantului, iar ticurile urmatoare (pornite de `github-actions[bot]`) folosesc calea live. Un rezultat `NO_ENTRY` este succes si ramane fara notificare. O eroare tehnica (date OKX lipsa, vechi sau HTTP) face rularea rosie.
 
 ## Deduplicare
 
-In dry-run nu se scrie si nu se salveaza starea de deduplicare. `concurrency` (grupul `ai-crypto-trader-entry-monitor-${{ github.ref }}`) nu permite doua scanari simultane pe acelasi branch.
+Semnatura unui semnal include simbolul, directia, pivotul 1H, lumanarea de sweep si lumanarea 15m de confirmare. Pe calea live, starea `ai_crypto_monitor/state/dedup.json` este restaurata din cache-ul GitHub Actions (`ai-crypto-dedup-<branch>-*`) si salvata intr-un cache nou numai dupa ce Telegram a acceptat alerta (`alert_sent=true`). Acelasi setup confirmat nu poate alerta de doua ori. Risc rezidual: daca Telegram accepta alerta, dar salvarea cache-ului esueaza, un tic ulterior din fereastra de 420 s ar putea repeta alerta; esecul se vede in log. In dry-run nu se scrie si nu se salveaza starea. `concurrency` (grupul `ai-crypto-trader-entry-monitor-${{ github.ref }}`) nu permite doua scanari simultane pe acelasi branch.
 
 ## Programare
 
@@ -55,7 +70,7 @@ Fiecare rulare este un "tic" cu trei joburi:
 2. `monitor`: ruleaza `scheduler/cadence.py`, care nu doarme. Planificatorul verifica ora reala in `Europe/Brussels`; numai intre `08:00` si `22:00` ruleaza testele si scannerul `--dry-run`. Apoi alege environment-ul de asteptare pentru succesor. Verifica si ca wait timer-ul chiar a fost aplicat: daca rularea porneste cu peste 30 de secunde inainte de `not_before`, ori environment-ul nu este in lista de mai jos, jobul esueaza si lantul se opreste (protectie contra buclelor rapide daca un environment lipseste sau nu are timer).
 3. `next-tick`: singurul job cu `actions: write`. Porneste succesorul prin `workflow_dispatch` cu tokenul efemer al rularii (`github.token`) si reincearca de cel mult 3 ori (dupa 5, 15 si 30 de secunde) la erori de retea, 408, 429 sau 5xx. Ruleaza si daca scanarea a esuat, ca o eroare OKX sa nu rupa lantul. Anularea manuala a unei rulari opreste lantul.
 
-Ziua: fiecare tic alege 9 sau 10 minute, astfel incat scanarea urmatoare sa cada cat mai aproape de minutele `:00`, `:10`, ..., `:50` (ultima la `21:50`). Seara: dupa scanarea de la `21:50`, succesorul asteapta intr-un environment overnight si porneste in jurul orei `08:00`, fara rulari in timpul noptii. Durata noptii este aleasa automat din fusul `Europe/Brussels`: 610 minute intr-o noapte normala (CET sau CEST), 550 in noaptea trecerii la ora de vara, 670 in noaptea trecerii la ora de iarna.
+Ziua: fiecare tic alege 9 sau 10 minute, astfel incat scanarea urmatoare sa cada cat mai aproape de `:00:45`, `:10:45`, ..., `:50:45` (ultima in jurul `21:50:45`). Faza de 45 s dupa minutul rotund face ca fiecare lumanare 15m de confirmare sa fie scanata in cel mult ~6,5 minute dupa inchidere (la `:00`/`:30` in ~45 s, la `:15`/`:45` in ~5 min 45 s), deci in fereastra de valabilitate de 420 s. Overhead-ul folosit de planificator (25 s) este cel masurat live. Seara: dupa ultima scanare, succesorul asteapta intr-un environment overnight si porneste in jurul orei `08:00`, fara rulari in timpul noptii. Durata noptii este aleasa automat din fusul `Europe/Brussels`: 610 minute intr-o noapte normala (CET sau CEST), 550 in noaptea trecerii la ora de vara, 670 in noaptea trecerii la ora de iarna.
 
 Environments de creat in `Settings` > `Environments` (nume exacte; fara secrete, fara reviewers; `Deployment branches and tags` = `No restriction`):
 

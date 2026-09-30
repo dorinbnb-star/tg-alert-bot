@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -89,14 +90,41 @@ class ChainSimulationTests(unittest.TestCase):
         self.assertEqual([610, 610], [w for w in waits if w >= 550])
 
 
+class ConfirmationCoverageTests(unittest.TestCase):
+    MEASURED_OVERHEADS = (20, 25, 30, 45)
+
+    def test_every_15m_confirmation_is_scanned_within_entry_validity(self) -> None:
+        config = json.loads((PROJECT_ROOT / "ai_crypto_monitor" / "config-v0.1.json").read_text(encoding="utf-8"))
+        validity = timedelta(seconds=config["entry_valid_seconds"])
+        grace = timedelta(seconds=config["closed_candle_grace_seconds"])
+        for overhead in self.MEASURED_OVERHEADS:
+            scans, _ = simulate(utc("2026-09-28T06:00:40"), utc("2026-09-29T20:05:00"), timedelta(seconds=overhead))
+            for day in ("2026-09-28", "2026-09-29"):
+                closes = [utc(f"{day}T06:00:00") + timedelta(minutes=15 * k) for k in range(56)]
+                for close in closes:
+                    first = next(scan for scan in scans if scan > close + grace)
+                    self.assertLessEqual(first - close, validity, (overhead, local(close)))
+
+    def test_overnight_tick_itself_scans_just_after_0800(self) -> None:
+        for overhead in self.MEASURED_OVERHEADS:
+            scans, waits = simulate(utc("2026-09-28T06:00:40"), utc("2026-09-29T07:00:00"), timedelta(seconds=overhead))
+            morning = [scan for scan in scans if scan >= utc("2026-09-29T05:00:00")]
+            self.assertTrue(morning, overhead)
+            self.assertLessEqual(morning[0], utc("2026-09-29T06:02:30"), (overhead, local(morning[0])))
+            self.assertGreaterEqual(morning[0], utc("2026-09-29T06:00:00"))
+            last_evening = max(scan for scan in scans if scan < utc("2026-09-28T20:00:00"))
+            self.assertEqual(timedelta(minutes=610, seconds=overhead), morning[0] - last_evening, overhead)
+            self.assertEqual(1, waits.count(610))
+
+
 class TickDecisionTests(unittest.TestCase):
     def test_aligned_day_tick_scans_and_picks_day_wait(self) -> None:
         decision = cadence.plan(utc("2026-09-28T08:00:45"), "scan-wait-9m", "2026-09-28T07:51:00Z", True, "")
         self.assertEqual("", decision["problem"])
         self.assertTrue(decision["active"])
         self.assertTrue(decision["chain"])
-        self.assertEqual("scan-wait-9m", decision["next_wait_env"])
-        self.assertEqual("2026-09-28T08:09:45Z", decision["next_not_before"])
+        self.assertEqual("scan-wait-10m", decision["next_wait_env"])
+        self.assertEqual("2026-09-28T08:10:45Z", decision["next_not_before"])
 
     def test_last_evening_scan_switches_to_overnight_wait(self) -> None:
         decision = cadence.plan(utc("2026-09-28T19:50:45"), "scan-wait-9m", "", True, "")

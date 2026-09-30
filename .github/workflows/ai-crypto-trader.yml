@@ -1,6 +1,8 @@
 name: AI Crypto Trader Entry Monitor
 
-# Dry-run only: no path in this workflow reads Telegram secrets, calls Telegram or saves dedup state.
+# Live alerts only on main ticks started by `schedule` or by the chain itself (github-actions[bot]); only that
+# "Live scan" step reads TELEGRAM_TOKEN/TELEGRAM_CHAT_ID and it sends only on a confirmed NOW=ENTER setup.
+# Manual workflow_dispatch runs, re-runs and other branches take the "Dry-run scan" step and never see secrets.
 # Cadence: each tick is delayed by an Environment wait timer on its `wait` job (no runner is held while waiting),
 # scans inside 08:00-22:00 Europe/Brussels and dispatches the next tick with the ephemeral GITHUB_TOKEN.
 # After the last evening scan the next tick waits in an overnight environment until ~08:00.
@@ -80,8 +82,32 @@ jobs:
         run: python -m unittest discover -s tests -v
 
       - name: Dry-run scan (OKX public candles, no Telegram, writes Step Summary)
-        if: steps.cadence.outputs.active == 'true'
+        if: ${{ steps.cadence.outputs.active == 'true' && !(github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.triggering_actor == 'github-actions[bot]')) }}
         run: python ai_crypto_monitor/entry_monitor.py scan --root "$GITHUB_WORKSPACE" --dry-run
+
+      - name: Restore persistent dedup state
+        if: ${{ steps.cadence.outputs.active == 'true' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.triggering_actor == 'github-actions[bot]') }}
+        uses: actions/cache/restore@v4
+        with:
+          path: ai_crypto_monitor/state/dedup.json
+          key: ai-crypto-dedup-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            ai-crypto-dedup-${{ github.ref_name }}-
+
+      - name: Live scan (OKX public candles, Telegram only on NOW=ENTER, writes Step Summary)
+        id: live
+        if: ${{ steps.cadence.outputs.active == 'true' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.triggering_actor == 'github-actions[bot]') }}
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python ai_crypto_monitor/entry_monitor.py scan --root "$GITHUB_WORKSPACE" --send
+
+      - name: Save dedup state after Telegram accepted an alert
+        if: ${{ always() && steps.live.outputs.alert_sent == 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ai_crypto_monitor/state/dedup.json
+          key: ai-crypto-dedup-${{ github.ref_name }}-${{ github.run_id }}
 
   next-tick:
     needs: monitor
