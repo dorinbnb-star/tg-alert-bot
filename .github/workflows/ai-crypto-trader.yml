@@ -1,52 +1,105 @@
 name: AI Crypto Trader Entry Monitor
 
 # Dry-run only: no path in this workflow reads Telegram secrets, calls Telegram or saves dedup state.
+# Cadence: each tick is delayed by an Environment wait timer on its `wait` job (no runner is held while waiting),
+# scans inside 08:00-22:00 Europe/Brussels and dispatches the next tick with the ephemeral GITHUB_TOKEN.
+# After the last evening scan the next tick waits in an overnight environment until ~08:00.
+# The crons below only seed or recover the chain. Cancelling a run stops the chain.
 on:
   workflow_dispatch:
+    inputs:
+      wait_env:
+        description: "Wait environment for this tick (set by the previous tick; empty = run now)"
+        required: false
+        default: ""
+      not_before:
+        description: "Earliest expected UTC start after the wait (set by the previous tick)"
+        required: false
+        default: ""
+      ticks:
+        description: "Remaining chained ticks on non-default branches (bounded proof runs)"
+        required: false
+        default: ""
   schedule:
-    # Covers 08:00-21:50 Europe/Brussels in both CET and CEST.
-    # The first step applies the exact local-time gate for DST transitions.
-    - cron: "*/10 6-20 * * *"
+    - cron: "52 5,6 * * *"
+    - cron: "7 6-20 * * *"
 
 permissions:
   contents: read
 
 concurrency:
-  group: ai-crypto-trader-entry-monitor
+  # Isolated per ref: a proof chain on another branch can never cancel or delay a pending tick on main.
+  group: ai-crypto-trader-entry-monitor-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  monitor:
+  wait:
+    if: inputs.wait_env != ''
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 2
+    environment: ${{ inputs.wait_env }}
+    permissions: {}
 
     steps:
-      - name: Check Brussels scan window
-        id: window
-        shell: bash
-        run: |
-          local_hour="$(TZ=Europe/Brussels date +%H)"
-          if [ "$((10#$local_hour))" -ge 8 ] && [ "$((10#$local_hour))" -lt 22 ]; then
-            echo "active=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "active=false" >> "$GITHUB_OUTPUT"
-            echo "Scanner paused outside 08:00-22:00 Europe/Brussels."
-          fi
+      - name: Wait timer elapsed
+        run: echo "Environment wait timer elapsed"
 
+  monitor:
+    needs: wait
+    if: ${{ !cancelled() && (needs.wait.result == 'success' || needs.wait.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      chain: ${{ steps.cadence.outputs.chain }}
+      next_wait_env: ${{ steps.cadence.outputs.next_wait_env }}
+      next_not_before: ${{ steps.cadence.outputs.next_not_before }}
+      next_ticks: ${{ steps.cadence.outputs.next_ticks }}
+
+    steps:
       - name: Checkout
-        if: steps.window.outputs.active == 'true'
         uses: actions/checkout@v4
 
       - name: Setup Python
-        if: steps.window.outputs.active == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
+      - name: Plan next tick and check Brussels scan window
+        id: cadence
+        env:
+          WAIT_ENV: ${{ inputs.wait_env }}
+          NOT_BEFORE: ${{ inputs.not_before }}
+          TICKS: ${{ inputs.ticks }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'main' }}
+        run: python scheduler/cadence.py --wait-env "$WAIT_ENV" --not-before "$NOT_BEFORE" --ticks "$TICKS" --default-branch "$DEFAULT_BRANCH" --ref-name "$GITHUB_REF_NAME"
+
       - name: Run tests
-        if: steps.window.outputs.active == 'true'
+        if: steps.cadence.outputs.active == 'true'
         run: python -m unittest discover -s tests -v
 
       - name: Dry-run scan (OKX public candles, no Telegram, writes Step Summary)
-        if: steps.window.outputs.active == 'true'
+        if: steps.cadence.outputs.active == 'true'
         run: python ai_crypto_monitor/entry_monitor.py scan --root "$GITHUB_WORKSPACE" --dry-run
+
+  next-tick:
+    needs: monitor
+    if: ${{ !cancelled() && needs.monitor.outputs.chain == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      actions: write
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Dispatch next tick (bounded retry)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          NEXT_WAIT_ENV: ${{ needs.monitor.outputs.next_wait_env }}
+          NEXT_NOT_BEFORE: ${{ needs.monitor.outputs.next_not_before }}
+          NEXT_TICKS: ${{ needs.monitor.outputs.next_ticks }}
+        run: python3 scheduler/dispatch.py --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" --workflow ai-crypto-trader.yml --wait-env "$NEXT_WAIT_ENV" --not-before "$NEXT_NOT_BEFORE" --ticks "$NEXT_TICKS"
