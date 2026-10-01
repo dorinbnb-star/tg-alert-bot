@@ -19,6 +19,11 @@ from pathlib import Path
 from typing import Callable
 from zoneinfo import ZoneInfo
 
+try:
+    from ai_crypto_monitor import scan_diagnostics
+except ModuleNotFoundError:  # Direct script execution used by the workflow.
+    import scan_diagnostics
+
 
 LOGGER = logging.getLogger("entry-monitor")
 BRUSSELS = ZoneInfo("Europe/Brussels")
@@ -125,6 +130,33 @@ def package_dir(root: Path) -> Path:
 
 def state_dir(root: Path) -> Path:
     return package_dir(root) / "state"
+
+
+def diagnostic_paths() -> tuple[Path, Path, Path] | None:
+    log = os.getenv("SCAN_DIAGNOSTICS_FILE", "").strip()
+    if not log:
+        return None
+    log_path = Path(log)
+    current = Path(os.getenv("SCAN_DIAGNOSTICS_CURRENT", str(log_path.with_name("current-scan-diagnostic.jsonl"))))
+    meta = Path(os.getenv("SCAN_DIAGNOSTICS_META", str(log_path.with_name("scan-diagnostics-meta.json"))))
+    return log_path, current, meta
+
+
+def append_diagnostic(trace: dict, status: str, symbol: str) -> None:
+    paths = diagnostic_paths()
+    if paths is None:
+        return
+    log_path, current_path, meta_path = paths
+    row = {"symbol": symbol, "status": status, **trace}
+    try:
+        scan_diagnostics.append_row(log_path, current_path, meta_path, row)
+    except Exception as exc:  # Diagnostics must never change an entry decision or delivery.
+        LOGGER.warning("diagnostic_write_failed=%s", type(exc).__name__)
+
+
+def append_scan_error(error: str) -> None:
+    symbol = os.getenv("SCAN_DIAGNOSTICS_SYMBOL", "BTC-USDT-SWAP")
+    append_diagnostic({"stopped_at": "SCAN_ERROR", "reason": error}, "SCAN_ERROR", symbol)
 
 
 def load_env_file(path: Path | None) -> dict[str, str]:
@@ -460,22 +492,52 @@ def opposing_target(all_pivots: list[Pivot], direction: str, entry: float, befor
     return max(levels) if levels else None
 
 
+TRACE_ORDER = {"DATA": 0, "BIAS": 1, "PIVOT": 2, "SWEEP": 3, "REENTRY": 4, "CONFIRMATION": 5, "TARGET": 6, "RR": 7, "ENTRY": 8}
+
+
+def advance_trace(trace: dict | None, passed: str, stopped_at: str | None, **values: object) -> None:
+    if trace is None:
+        return
+    current = str(trace.get("last_passed", "DATA"))
+    if TRACE_ORDER[passed] < TRACE_ORDER.get(current, 0):
+        return
+    trace.update(values)
+    trace["last_passed"] = passed
+    trace["stopped_at"] = stopped_at
+
+
+def shadow_target(all_pivots: list[Pivot], direction: str, entry: float, before_ms: int) -> float | None:
+    available = [pivot for pivot in all_pivots if pivot.confirmed_at_ms <= before_ms]
+    if direction == "LONG":
+        levels = sorted({pivot.level for pivot in available if pivot.kind == "HIGH" and pivot.level > entry})
+    else:
+        levels = sorted(
+            {pivot.level for pivot in available if pivot.kind == "LOW" and pivot.level < entry}, reverse=True,
+        )
+    return levels[1] if len(levels) > 1 else None
+
+
 def detect_entry(
     context: list[Candle],
     structure: list[Candle],
     trigger: list[Candle],
     rules: dict,
     config: dict,
+    trace: dict | None = None,
 ) -> EntrySignal | None:
     direction = market_bias(context, structure)
+    snapshot = bias_snapshot(context, structure) if context and structure else {}
+    advance_trace(trace, "DATA", "BIAS", bias=direction or "NEUTRAL", **snapshot)
     if direction is None:
         return None
+    advance_trace(trace, "BIAS", "PIVOT", bias=direction)
     side = int(rules["reference_pivot_closed_candles_each_side"])
     all_pivots = pivots(structure, side)
     reference_kind = "LOW" if direction == "LONG" else "HIGH"
     references = [pivot for pivot in all_pivots if pivot.kind == reference_kind]
     if not references:
         return None
+    advance_trace(trace, "PIVOT", "SWEEP", reference_count=len(references))
     recent_trigger = trigger[-int(config["signal_lookback_15m_candles"]):]
     min_sweep = float(rules["min_sweep_percent"]) / 100
     max_sweep = float(rules["max_sweep_percent"]) / 100
@@ -495,11 +557,22 @@ def detect_entry(
                 depth = (sweep.high - reference.level) / reference.level
             if not min_sweep <= depth <= max_sweep:
                 continue
+            advance_trace(
+                trace, "SWEEP", "REENTRY",
+                reference_level=reference.level,
+                sweep_depth_percent=depth * 100,
+                sweep_start_ms=sweep.start_ms,
+            )
             for reentry_index in range(sweep_index, min(len(recent_trigger), sweep_index + reentry_window)):
                 reentry = recent_trigger[reentry_index]
                 reentered = reentry.close > reference.level if direction == "LONG" else reentry.close < reference.level
                 if not reentered:
                     continue
+                advance_trace(
+                    trace, "REENTRY", "CONFIRMATION",
+                    reentry_start_ms=reentry.start_ms,
+                    reentry_level=reentry.high if direction == "LONG" else reentry.low,
+                )
                 end_confirmation = min(len(recent_trigger), reentry_index + confirmation_window + 1)
                 for confirmation_index in range(reentry_index + 1, end_confirmation):
                     confirmation = recent_trigger[confirmation_index]
@@ -510,6 +583,14 @@ def detect_entry(
                     extreme = min(c.low for c in relevant_sweeps) if direction == "LONG" else max(c.high for c in relevant_sweeps)
                     entry = confirmation.close
                     stop = extreme * (1 - buffer_fraction) if direction == "LONG" else extreme * (1 + buffer_fraction)
+                    confirmation_end = confirmation.start_ms + interval_ms("15")
+                    advance_trace(
+                        trace, "CONFIRMATION", "TARGET",
+                        confirmation_start_ms=confirmation.start_ms,
+                        confirmation_end_ms=confirmation_end,
+                        entry=entry,
+                        stop=stop,
+                    )
                     target = opposing_target(all_pivots, direction, entry, confirmation.start_ms)
                     if target is None:
                         continue
@@ -518,9 +599,24 @@ def detect_entry(
                     if risk <= 0 or reward <= 0:
                         continue
                     rr = reward / risk
+                    second_target = shadow_target(all_pivots, direction, entry, confirmation.start_ms)
+                    shadow_reward = None
+                    shadow_rr = None
+                    if second_target is not None:
+                        shadow_reward = second_target - entry if direction == "LONG" else entry - second_target
+                        if shadow_reward > 0:
+                            shadow_rr = shadow_reward / risk
+                    advance_trace(
+                        trace, "TARGET", "RR",
+                        target=target,
+                        rr=rr,
+                        minimum_rr=min_rr,
+                        shadow_second_target=second_target,
+                        shadow_second_target_rr=shadow_rr,
+                    )
                     if rr < min_rr:
                         continue
-                    confirmation_end = confirmation.start_ms + interval_ms("15")
+                    advance_trace(trace, "ENTRY", None)
                     return EntrySignal(
                         symbol=config["symbol"], direction=direction,
                         reference_level=reference.level,
@@ -630,14 +726,44 @@ def scan_symbol(
 ) -> dict:
     detected_at_ms, series = fetch_closed_market(client, config)
     signal = detect_entry(series["context"], series["structure"], series["trigger"], rules, config)
+    trace: dict = {}
+    if diagnostic_paths() is not None:
+        try:
+            traced_signal = detect_entry(
+                series["context"], series["structure"], series["trigger"], rules, config, trace,
+            )
+            decision_signature = signal.signature if signal else None
+            traced_signature = traced_signal.signature if traced_signal else None
+            trace["trace_matches_decision"] = decision_signature == traced_signature
+        except Exception as exc:
+            trace = {
+                "stopped_at": "TRACE_ERROR",
+                "diagnostic_error": type(exc).__name__,
+                "trace_matches_decision": False,
+            }
+        trigger = series.get("trigger", [])
+        if trigger:
+            trace["trigger_close"] = trigger[-1].close
+            trace["trigger_start_ms"] = trigger[-1].start_ms
+        confirmation_end = trace.get("confirmation_end_ms")
+        if isinstance(confirmation_end, int):
+            trace["confirmation_age_seconds"] = (detected_at_ms - confirmation_end) / 1000
+
+    def finish(result: dict) -> dict:
+        append_diagnostic(trace, str(result["status"]), str(config["symbol"]))
+        if diagnostic_paths() is not None:
+            result["diagnostic"] = {"symbol": str(config["symbol"]), **trace}
+        return result
+
     if signal is None:
-        return {"status": "NO_ENTRY", "detected_at": utc_iso(detected_at_ms)}
+        return finish({"status": "NO_ENTRY", "detected_at": utc_iso(detected_at_ms)})
     try:
         checked_at_ms, live_price = final_entry_check(client, signal, config)
     except EntrySkipped as exc:
-        return {"status": "ENTRY_SKIPPED", "reason": str(exc), "signature": signal.signature[:12]}
+        trace["final_check_reason"] = str(exc)
+        return finish({"status": "ENTRY_SKIPPED", "reason": str(exc), "signature": signal.signature[:12]})
     if dedup.contains(signal.signature, checked_at_ms):
-        return {"status": "DUPLICATE", "signature": signal.signature[:12]}
+        return finish({"status": "DUPLICATE", "signature": signal.signature[:12]})
     message = format_entry_alert(signal, live_price)
     result = {
         "status": "ENTRY_READY_DRY_RUN" if dry_run else "ENTRY_READY",
@@ -653,7 +779,7 @@ def scan_symbol(
         sender(message)
         dedup.mark(signal.signature, checked_at_ms)
         result["status"] = "SENT"
-    return result
+    return finish(result)
 
 
 def scan_once(
@@ -726,6 +852,14 @@ def write_step_summary(result: dict | None = None, error: str | None = None) -> 
                 lines.append(f"- {item['status']} la {item['detected_at']}")
             else:
                 lines.append(f"- {item['status']}")
+            diagnostic = item.get("diagnostic")
+            if diagnostic:
+                stopped = diagnostic.get("stopped_at") or "ENTRY"
+                passed = diagnostic.get("last_passed", "necunoscut")
+                lines.append(
+                    f"  - Diagnostic {diagnostic.get('symbol', 'UNKNOWN')}: "
+                    f"oprit la `{stopped}` (ultima etapa trecuta: `{passed}`)"
+                )
         lines.append("")
     with Path(summary_path).open("a", encoding="utf-8") as handle:
         handle.write("\n".join(lines) + "\n")
@@ -799,6 +933,7 @@ def main(argv: list[str] | None = None) -> int:
     except (MonitorError, TelegramError) as exc:
         if args.command == "scan":
             write_step_summary(error=str(exc))
+            append_scan_error(str(exc))
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
 
