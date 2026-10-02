@@ -77,12 +77,43 @@ jobs:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'main' }}
         run: python scheduler/cadence.py --wait-env "$WAIT_ENV" --not-before "$NOT_BEFORE" --ticks "$TICKS" --default-branch "$DEFAULT_BRANCH" --ref-name "$GITHUB_REF_NAME"
 
+      - name: Restore cumulative scan diagnostics
+        id: diag-restore
+        if: steps.cadence.outputs.active == 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: ai_crypto_monitor/state/scan-diagnostics.jsonl
+          key: ai-crypto-diag-v1-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ai-crypto-diag-v1-${{ github.ref_name }}-
+
+      - name: Prepare scan diagnostics
+        if: steps.cadence.outputs.active == 'true'
+        env:
+          MATCHED_CACHE_KEY: ${{ steps.diag-restore.outputs.cache-matched-key }}
+          SCAN_DIAGNOSTICS_FILE: ${{ github.workspace }}/ai_crypto_monitor/state/scan-diagnostics.jsonl
+          SCAN_DIAGNOSTICS_CURRENT: ${{ github.workspace }}/ai_crypto_monitor/state/current-scan-diagnostic.jsonl
+          SCAN_DIAGNOSTICS_META: ${{ github.workspace }}/ai_crypto_monitor/state/scan-diagnostics-meta.json
+        run: >-
+          python -m ai_crypto_monitor.scan_diagnostics prepare
+          --log "$SCAN_DIAGNOSTICS_FILE"
+          --meta "$SCAN_DIAGNOSTICS_META"
+          --current "$SCAN_DIAGNOSTICS_CURRENT"
+          --matched-key "$MATCHED_CACHE_KEY"
+
       - name: Run tests
+        id: tests
         if: steps.cadence.outputs.active == 'true'
         run: python -m unittest discover -s tests -v
 
       - name: Dry-run scan (OKX public candles, no Telegram, writes Step Summary)
+        id: dry
         if: ${{ steps.cadence.outputs.active == 'true' && !(github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.triggering_actor == 'github-actions[bot]')) }}
+        env:
+          SCAN_DIAGNOSTICS_FILE: ${{ github.workspace }}/ai_crypto_monitor/state/scan-diagnostics.jsonl
+          SCAN_DIAGNOSTICS_CURRENT: ${{ github.workspace }}/ai_crypto_monitor/state/current-scan-diagnostic.jsonl
+          SCAN_DIAGNOSTICS_META: ${{ github.workspace }}/ai_crypto_monitor/state/scan-diagnostics-meta.json
+          SCAN_DIAGNOSTICS_SYMBOL: BTC-USDT-SWAP
         run: python ai_crypto_monitor/entry_monitor.py scan --root "$GITHUB_WORKSPACE" --dry-run
 
       - name: Restore persistent dedup state
@@ -100,6 +131,10 @@ jobs:
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          SCAN_DIAGNOSTICS_FILE: ${{ github.workspace }}/ai_crypto_monitor/state/scan-diagnostics.jsonl
+          SCAN_DIAGNOSTICS_CURRENT: ${{ github.workspace }}/ai_crypto_monitor/state/current-scan-diagnostic.jsonl
+          SCAN_DIAGNOSTICS_META: ${{ github.workspace }}/ai_crypto_monitor/state/scan-diagnostics-meta.json
+          SCAN_DIAGNOSTICS_SYMBOL: BTC-USDT-SWAP
         run: python ai_crypto_monitor/entry_monitor.py scan --root "$GITHUB_WORKSPACE" --send
 
       - name: Save dedup state after Telegram accepted an alert
@@ -108,6 +143,40 @@ jobs:
         with:
           path: ai_crypto_monitor/state/dedup.json
           key: ai-crypto-dedup-${{ github.ref_name }}-${{ github.run_id }}
+
+      - name: Ensure every active run has a diagnostic row
+        if: ${{ always() && steps.cadence.outputs.active == 'true' }}
+        env:
+          SCAN_STEP_OUTCOME: ${{ steps.live.outcome || steps.dry.outcome }}
+          TESTS_STEP_OUTCOME: ${{ steps.tests.outcome }}
+          SCAN_DIAGNOSTICS_FILE: ${{ github.workspace }}/ai_crypto_monitor/state/scan-diagnostics.jsonl
+          SCAN_DIAGNOSTICS_CURRENT: ${{ github.workspace }}/ai_crypto_monitor/state/current-scan-diagnostic.jsonl
+          SCAN_DIAGNOSTICS_META: ${{ github.workspace }}/ai_crypto_monitor/state/scan-diagnostics-meta.json
+          SCAN_DIAGNOSTICS_SYMBOL: BTC-USDT-SWAP
+        run: >-
+          python -m ai_crypto_monitor.scan_diagnostics ensure-error
+          --log "$SCAN_DIAGNOSTICS_FILE"
+          --meta "$SCAN_DIAGNOSTICS_META"
+          --current "$SCAN_DIAGNOSTICS_CURRENT"
+          --symbol "$SCAN_DIAGNOSTICS_SYMBOL"
+          --scan-outcome "$SCAN_STEP_OUTCOME"
+          --tests-outcome "$TESTS_STEP_OUTCOME"
+
+      - name: Save cumulative scan diagnostics
+        if: ${{ always() && steps.cadence.outputs.active == 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ai_crypto_monitor/state/scan-diagnostics.jsonl
+          key: ai-crypto-diag-v1-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Upload this run diagnostic
+        if: ${{ always() && steps.cadence.outputs.active == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: scan-diag-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ai_crypto_monitor/state/current-scan-diagnostic.jsonl
+          if-no-files-found: error
+          retention-days: 14
 
   next-tick:
     needs: monitor

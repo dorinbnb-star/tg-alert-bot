@@ -56,6 +56,20 @@ Secretele se creeaza in `Settings` > `Secrets and variables` > `Actions` > `Repo
 
 Semnatura unui semnal include simbolul, directia, pivotul 1H, lumanarea de sweep si lumanarea 15m de confirmare. Pe calea live, starea `ai_crypto_monitor/state/dedup.json` este restaurata din cache-ul GitHub Actions (`ai-crypto-dedup-<branch>-*`) si salvata intr-un cache nou numai dupa ce Telegram a acceptat alerta (`alert_sent=true`). Acelasi setup confirmat nu poate alerta de doua ori. Risc rezidual: daca Telegram accepta alerta, dar salvarea cache-ului esueaza, un tic ulterior din fereastra de 420 s ar putea repeta alerta; esecul se vede in log. In dry-run nu se scrie si nu se salveaza starea. `concurrency` (grupul `ai-crypto-trader-entry-monitor-${{ github.ref }}`) nu permite doua scanari simultane pe acelasi branch.
 
+## Diagnostic de strategie (experiment de 7 zile)
+
+Diagnosticul este separat de `dedup.json` si nu schimba decizia, alerta sau configuratia strategiei. Decizia se calculeaza intai fara trace; o a doua evaluare produce numai explicatia. Daca trace-ul esueaza, semnalul si livrarea raman neschimbate.
+
+Pentru fiecare scanare si simbol, randul JSONL contine biasul si valorile EMA, ultima etapa trecuta, filtrul la care s-a oprit, datele celui mai avansat candidat (sweep, entry, SL, TP si R:R), varsta confirmarii si un R:R shadow pentru al doilea pivot 1H. Campul shadow nu participa la decizie. In v0.1 lista `symbols` contine numai `BTC-USDT-SWAP`; frecventa observata nu trebuie interpretata ca frecventa intregii piete.
+
+Istoricul cumulativ este restaurat si salvat la fiecare scanare activa intr-un cache separat, cu prefixul `ai-crypto-diag-v1-<branch>-`. Fiecare rulare publica separat `scan-diag-<run_id>-<attempt>`, pastrat 14 zile, astfel incat datele sa poata fi reconstruite daca dispare cache-ul. Un pas final cu `always()` scrie `SCAN_ERROR` cand testele, scannerul sau procesul se opresc inainte sa produca randul normal. `cache_reset`, `restored_rows`, `run_id` si `run_attempt` fac intreruperile de persistenta vizibile.
+
+Artifactele descarcate se rezuma local cu:
+
+```text
+python -m ai_crypto_monitor.scan_diagnostics summarize <director-artifacte>
+```
+
 ## Programare
 
 ### De ce `schedule` singur nu ajunge

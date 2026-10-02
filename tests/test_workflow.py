@@ -132,8 +132,13 @@ class WorkflowDryRunOnlyTests(unittest.TestCase):
     def test_dry_run_path_never_sees_secrets_or_sends(self) -> None:
         dry = monitor_steps()[DRY_STEP]
         self.assertIn('entry_monitor.py scan --root "$GITHUB_WORKSPACE" --dry-run', dry)
-        for fragment in ("secrets.", "TELEGRAM", "--send", "env:"):
+        for fragment in ("secrets.", "TELEGRAM", "--send"):
             self.assertNotIn(fragment, dry)
+        env_names = re.findall(r"^\s{10}([A-Z_]+):", dry, flags=re.MULTILINE)
+        self.assertEqual(
+            ["SCAN_DIAGNOSTICS_FILE", "SCAN_DIAGNOSTICS_CURRENT", "SCAN_DIAGNOSTICS_META", "SCAN_DIAGNOSTICS_SYMBOL"],
+            env_names,
+        )
 
     def test_only_the_live_step_reads_exactly_the_two_telegram_secrets(self) -> None:
         text = "\n".join(active_lines())
@@ -170,6 +175,32 @@ class WorkflowDryRunOnlyTests(unittest.TestCase):
             self.assertIn("path: ai_crypto_monitor/state/dedup.json", body)
             self.assertIn("key: ai-crypto-dedup-${{ github.ref_name }}-${{ github.run_id }}", body)
         self.assertIn("id: live\n", steps[LIVE_STEP])
+
+    def test_diagnostics_are_separate_persistent_and_uploaded_for_every_active_run(self) -> None:
+        steps = monitor_steps()
+        restore = steps["Restore cumulative scan diagnostics"]
+        prepare = steps["Prepare scan diagnostics"]
+        ensure = steps["Ensure every active run has a diagnostic row"]
+        save = steps["Save cumulative scan diagnostics"]
+        upload = steps["Upload this run diagnostic"]
+        self.assertIn("uses: actions/cache/restore@v4", restore)
+        self.assertIn("ai-crypto-diag-v1-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}", restore)
+        self.assertIn("ai_crypto_monitor/state/scan-diagnostics.jsonl", restore)
+        self.assertNotIn("dedup.json", restore)
+        self.assertIn("scan_diagnostics prepare", prepare)
+        self.assertIn("if: ${{ always() && steps.cadence.outputs.active == 'true' }}", ensure)
+        self.assertIn("scan_diagnostics ensure-error", ensure)
+        self.assertIn("steps.live.outcome || steps.dry.outcome", ensure)
+        self.assertIn("uses: actions/cache/save@v4", save)
+        self.assertIn("github.run_attempt", save)
+        self.assertIn("uses: actions/upload-artifact@v4", upload)
+        self.assertIn("scan-diag-${{ github.run_id }}-${{ github.run_attempt }}", upload)
+        self.assertIn("retention-days: 14", upload)
+        self.assertIn("current-scan-diagnostic.jsonl", upload)
+        self.assertNotIn("SCAN_DIAGNOSTICS_", steps["Run tests"])
+        self.assertNotIn("    env:\n      SCAN_DIAGNOSTICS_", jobs()["monitor"].split("    steps:", 1)[0])
+        for name in ("Prepare scan diagnostics", DRY_STEP, LIVE_STEP, "Ensure every active run has a diagnostic row"):
+            self.assertIn("SCAN_DIAGNOSTICS_FILE:", steps[name], name)
 
     def test_never_calls_telegram_directly_or_uses_local_credentials(self) -> None:
         text = "\n".join(active_lines())
