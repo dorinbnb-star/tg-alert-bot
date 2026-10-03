@@ -35,6 +35,22 @@ def live_diagnostic(client: ReplayOkxClient, config: dict, rules: dict) -> dict:
     return trace
 
 
+def context_probe(series: dict, scan_ms: int, expected: dict) -> str:
+    """On a mismatch: which 4H window length reproduces the live EMAs exactly, and the gaps in the 4H data."""
+    step = em.interval_ms("240")
+    candles = [c for c in series["240"] if c.start_ms + step <= scan_ms]
+    closes = [c.close for c in candles]
+    matches = []
+    for length in range(200, min(len(closes), 300) + 1):
+        window = closes[-length:]
+        if em.ema(window, 50) == expected.get("context_ema50") and em.ema(window, 200) == expected.get("context_ema200"):
+            matches.append(f"{length} (de la {download.iso(candles[-length].start_ms)})")
+    gaps = [f"{download.iso(a.start_ms)}->{download.iso(b.start_ms)}" for a, b in zip(candles, candles[1:])
+            if b.start_ms - a.start_ms != step]
+    return (f"4H inchise disponibile {len(candles)} (prima {download.iso(candles[0].start_ms) if candles else '-'}); "
+            f"lungimi care reproduc EMA live: {matches or 'niciuna'}; goluri 4H: {gaps or 'niciunul'}")
+
+
 class GoldenRun369Tests(unittest.TestCase):
     def test_golden_covers_all_config_symbols(self) -> None:
         self.assertEqual(download.symbols(), list(GOLDEN["symbols"]))
@@ -53,7 +69,10 @@ class GoldenRun369Tests(unittest.TestCase):
                       for k in ("context", "structure", "trigger")}
             client = ReplayOkxClient(series).at(download.parse_utc(item["detected_at"]))
             with self.subTest(symbol=symbol):
-                self.assertEqual(item["diagnostic"], live_diagnostic(client, config, rules))
+                actual = live_diagnostic(client, config, rules)
+                probe = "" if actual == item["diagnostic"] else context_probe(
+                    series, download.parse_utc(item["detected_at"]), item["diagnostic"])
+                self.assertEqual(item["diagnostic"], actual, probe)
                 identical.append(symbol)
         print(f"\ngolden run 369: {len(identical)}/{len(GOLDEN['symbols'])} monede identice: "
               + ", ".join(s.replace('-USDT-SWAP', '') for s in identical), flush=True)

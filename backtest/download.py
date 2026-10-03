@@ -302,7 +302,7 @@ def command_golden(args: argparse.Namespace) -> int:
             step = em.interval_ms(interval)
             limit = int(config["history_limits"][key])
             end = (scan_ms // step) * step + step  # include the candle that was still open at the scan
-            start = end - (limit + 10) * step
+            start = end - (limit + 60) * step  # extra history so a window mismatch can be diagnosed
             ensure_series(fetcher, root, manifest, symbol, interval, start, end)
     print(f"cereri OKX: {fetcher.requests}", flush=True)
     return 0
