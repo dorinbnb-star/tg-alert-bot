@@ -1,0 +1,101 @@
+name: Backtest v1
+
+# Offline backtest of the live v1 rules. Separate from the live bot: own trigger, own concurrency group, no secrets,
+# no Telegram, read-only token, never on main. OKX history stays on the runner (and in the Actions cache), never in git.
+on:
+  push:
+    branches:
+      - codex/github-actions-monitor
+    paths:
+      - "backtest/**"
+      - ".github/workflows/backtest.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backtest-v1-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  backtest:
+    if: github.ref != 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Restore OKX history
+        id: data
+        uses: actions/cache/restore@v4
+        with:
+          path: backtest_data
+          key: backtest-okx-v1-2026-10-03-${{ hashFiles('backtest/download.py', 'backtest/tests/golden_run369.json') }}
+
+      - name: Re-confirm OKX fees, rate limits and funding depth from the official pages
+        run: python -m backtest.download docs
+
+      - name: Download OKX history (4H, 1H, 15m, funding)
+        timeout-minutes: 75
+        run: python -m backtest.download candles
+
+      - name: Download the live windows of run 369 (golden test)
+        run: python -m backtest.download golden
+
+      - name: Save OKX history
+        if: steps.data.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: backtest_data
+          key: ${{ steps.data.outputs.cache-primary-key }}
+
+      - name: Backtest tests (mutation, no look-ahead, live equivalence, golden run 369)
+        env:
+          BACKTEST_REQUIRE_GOLDEN: "1"
+        run: python -m unittest discover -s backtest/tests -t . -v
+
+      - name: Detect (replay of the live scan on the live cadence)
+        run: python -m backtest.simulate detect
+
+      - name: Download 1m candles around the detections
+        run: python -m backtest.download minute
+
+      - name: Simulate trades
+        run: python -m backtest.simulate trades
+
+      - name: Reproducibility (same command, same data, different process count)
+        run: |
+          python -m backtest.simulate --out backtest_results/repro --processes 2 detect
+          python -m backtest.simulate --out backtest_results/repro --processes 2 trades --detections backtest_results/repro/detections.jsonl
+          for name in detections.jsonl detect_summary.json trades.csv trade_summary.json; do
+            first=$(sha256sum "backtest_results/$name" | cut -d' ' -f1)
+            second=$(sha256sum "backtest_results/repro/$name" | cut -d' ' -f1)
+            echo "$name $first $second"
+            test "$first" = "$second"
+          done
+
+      - name: Report (log, Step Summary, files)
+        run: |
+          python -m backtest.report
+          echo "manifest:"
+          cat backtest_data/manifest.json
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backtest-v1-results
+          path: |
+            backtest_results/
+            backtest_data/manifest.json
+          if-no-files-found: warn
+          retention-days: 30

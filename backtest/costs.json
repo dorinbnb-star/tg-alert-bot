@@ -1,0 +1,29 @@
+{
+  "taker_fee_rate": 0.0005,
+  "taker_fee_note": "OKX perpetual swap, regular user Lv1: maker 0.020%, taker 0.050%. Taker is charged on entry and on every exit (also TP), conservatively.",
+  "slippage_rate": {
+    "BTC-USDT-SWAP": 0.0002,
+    "ETH-USDT-SWAP": 0.0002,
+    "SOL-USDT-SWAP": 0.0005,
+    "XRP-USDT-SWAP": 0.0005,
+    "BNB-USDT-SWAP": 0.0005,
+    "AVAX-USDT-SWAP": 0.0005,
+    "LINK-USDT-SWAP": 0.0005,
+    "LTC-USDT-SWAP": 0.0005,
+    "default": 0.0010
+  },
+  "stop_slippage_multiplier": 2,
+  "funding_estimate": {
+    "floor_rate": 0.0001,
+    "quantile_of_abs_real_rates": 0.9,
+    "default_interval_hours": 8,
+    "note": "Where OKX returns no funding history, every funding time is charged against the position at max(floor_rate, p90 of |real rates| of that symbol); marked ESTIMARE in the report."
+  },
+  "sensitivity_multiplier": 2,
+  "sources": [
+    "https://www.okx.com/fees",
+    "https://www.okx.com/help/how-to-calculate-the-contract-transaction-fee",
+    "https://www.okx.com/docs-v5/en/#public-data-rest-api-get-candlesticks-history",
+    "https://www.okx.com/docs-v5/en/#public-data-rest-api-get-funding-rate-history"
+  ]
+}

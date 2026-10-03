@@ -5,3 +5,5 @@ __pycache__/
 *.py[cod]
 *.log
 ai_crypto_monitor/state/
+backtest_data/
+backtest_results/

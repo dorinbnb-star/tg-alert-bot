@@ -1,0 +1,358 @@
+{
+  "source": "AI Crypto Trader Entry Monitor, run 37138993637 (run 369), job 111250921184, step Live scan, 2026-10-03",
+  "symbols": {
+    "BTC-USDT-SWAP": {
+      "detected_at": "2026-10-03T17:10:40Z",
+      "diagnostic": {
+        "bias": "LONG",
+        "context_close": 84825.4,
+        "context_ema50": 84082.59142788044,
+        "context_ema200": 81638.95612526439,
+        "structure_close": 84831.6,
+        "structure_ema50": 84742.66517586503,
+        "last_passed": "PIVOT",
+        "stopped_at": "SWEEP",
+        "reference_count": 24,
+        "trace_matches_decision": true,
+        "trigger_start_ms": 1791045900000,
+        "trigger_close": 84831.6
+      }
+    },
+    "ETH-USDT-SWAP": {
+      "detected_at": "2026-10-03T17:10:41Z",
+      "diagnostic": {
+        "bias": "NEUTRAL",
+        "context_close": 2680.72,
+        "context_ema50": 2683.2887704560612,
+        "context_ema200": 2600.170539727245,
+        "structure_close": 2680.34,
+        "structure_ema50": 2689.3972137266155,
+        "last_passed": "DATA",
+        "stopped_at": "BIAS",
+        "trace_matches_decision": true,
+        "trigger_start_ms": 1791045900000,
+        "trigger_close": 2680.34
+      }
+    },
+    "SOL-USDT-SWAP": {
+      "detected_at": "2026-10-03T17:10:42Z",
+      "diagnostic": {
+        "bias": "LONG",
+        "context_close": 119.64,
+        "context_ema50": 118.4756041894209,
+        "context_ema200": 111.16828674001486,
+        "structure_close": 119.64,
+        "structure_ema50": 119.4058969233486,
+        "last_passed": "SWEEP",
+        "stopped_at": "REENTRY",
+        "reference_count": 24,
+        "reference_level": 120.04,
+        "sweep_depth_percent": 0.3998667110963045,
+        "sweep_start_ms": 1791045900000,
+        "trace_matches_decision": true,
+        "trigger_start_ms": 1791045900000,
+        "trigger_close": 119.64
+      }
+    },
+    "XRP-USDT-SWAP": {
+      "detected_at": "2026-10-03T17:10:43Z",
+      "diagnostic": {
+        "bias": "NEUTRAL",
+        "context_close": 1.4888,
+        "context_ema50": 1.497881576149952,
+        "context_ema200": 1.4595213548594568,
+        "structure_close": 1.4892,
+        "structure_ema50": 1.493327889497576,
+        "last_passed": "DATA",
+        "stopped_at": "BIAS",
+        "trace_matches_decision": true,
+        "trigger_start_ms": 1791045900000,
+        "trigger_close": 1.4892
+      }
+    },
+    "BNB-USDT-SWAP": {
+      "detected_at": "2026-10-03T17:10:44Z",
+      "diagnostic": {
+        "bias": "LONG",
+        "context_close": 778.5,
+        "context_ema50": 768.3932036038173,
+        "context_ema200": 749.3906321124296,
+        "structure_close": 779.9,
+        "structure_ema50": 770.5192176116042,
+        "last_passed": "REENTRY",
+        "stopped_at": "CONFIRMATION",
+        "reference_count": 21,
+        "reference_level": 774.2,
+        "sweep_depth_percent": 0.3745802118315798,
+        "sweep_start_ms": 1791033300000,
+        "reentry_start_ms": 1791036900000,
+        "reentry_level": 776.2,
+        "trace_matches_decision": true,
+        "trigger_start_ms": 1791045900000,
+        "trigger_close": 779.9
+      }
+    },
+    "AVAX-USDT-SWAP": {
+      "detected_at": "2026-10-03T17:10:45Z",
+      "diagnostic": {
+        "bias": "LONG",
+        "context_close": 11.085,
+        "context_ema50": 10.810243991041721,
+        "context_ema200": 9.436336781411635,
+        "structure_close": 11.059,
+        "structure_ema50": 10.979220045649038,
+        "last_passed": "REENTRY",
+        "stopped_at": "CONFIRMATION",
+        "reference_count": 23,
+        "reference_level": 10.964,
+        "sweep_depth_percent": 0.5016417365924819,
+        "sweep_start_ms": 1791020700000,
+        "reentry_start_ms": 1791028800000,
+        "reentry_level": 11.154,
+        "trace_matches_decision": true,
+        "trigger_start_ms": 1791045900000,
+        "trigger_close": 11.059
+      }
+    },
+    "LINK-USDT-SWAP": {
+      "detected_at": "2026-10-03T17:10:45Z",
+      "diagnostic": {
+        "bias": "NEUTRAL",
+        "context_close": 13.822,
+        "context_ema50": 14.016656501033323,
+        "context_ema200": 12.880203377785666,
+        "structure_close": 13.872,
+        "structure_ema50": 14.071016744455633,
+        "last_passed": "DATA",
+        "stopped_at": "BIAS",
+        "trace_matches_decision": true,
+        "trigger_start_ms": 1791045900000,
+        "trigger_close": 13.872
+      }
+    },
+    "LTC-USDT-SWAP": {
+      "detected_at": "2026-10-03T17:10:46Z",
+      "diagnostic": {
+        "bias": "NEUTRAL",
+        "context_close": 69.56,
+        "context_ema50": 68.04610281054563,
+        "context_ema200": 61.02181911662056,
+        "structure_close": 69.12,
+        "structure_ema50": 69.13975078193113,
+        "last_passed": "DATA",
+        "stopped_at": "BIAS",
+        "trace_matches_decision": true,
+        "trigger_start_ms": 1791045900000,
+        "trigger_close": 69.12
+      }
+    },
+    "SUI-USDT-SWAP": {
+      "detected_at": "2026-10-03T17:10:47Z",
+      "diagnostic": {
+        "bias": "LONG",
+        "context_close": 1.1766,
+        "context_ema50": 1.1352044028574189,
+        "context_ema200": 0.960141326241154,
+        "structure_close": 1.1711,
+        "structure_ema50": 1.167581345429135,
+        "last_passed": "REENTRY",
+        "stopped_at": "CONFIRMATION",
+        "reference_count": 25,
+        "reference_level": 1.1738,
+        "sweep_depth_percent": 0.1533481001874275,
+        "sweep_start_ms": 1791043200000,
+        "reentry_start_ms": 1791020700000,
+        "reentry_level": 1.1911,
+        "trace_matches_decision": true,
+        "trigger_start_ms": 1791045900000,
+        "trigger_close": 1.1711
+      }
+    },
+    "UNI-USDT-SWAP": {
+      "detected_at": "2026-10-03T17:10:48Z",
+      "diagnostic": {
+        "bias": "NEUTRAL",
+        "context_close": 9.009,
+        "context_ema50": 9.029288788061194,
+        "context_ema200": 7.805569003676767,
+        "structure_close": 8.977,
+        "structure_ema50": 9.049897877385837,
+        "last_passed": "DATA",
+        "stopped_at": "BIAS",
+        "trace_matches_decision": true,
+        "trigger_start_ms": 1791045900000,
+        "trigger_close": 8.977
+      }
+    },
+    "AAVE-USDT-SWAP": {
+      "detected_at": "2026-10-03T17:10:49Z",
+      "diagnostic": {
+        "bias": "LONG",
+        "context_close": 178.81,
+        "context_ema50": 163.90883123248705,
+        "context_ema200": 144.8781703105597,
+        "structure_close": 178.81,
+        "structure_ema50": 177.47029089008927,
+        "last_passed": "REENTRY",
+        "stopped_at": "CONFIRMATION",
+        "reference_count": 23,
+        "reference_level": 179.06,
+        "sweep_depth_percent": 0.08377080308276873,
+        "sweep_start_ms": 1791039600000,
+        "reentry_start_ms": 1791035100000,
+        "reentry_level": 181.29,
+        "trace_matches_decision": true,
+        "trigger_start_ms": 1791045900000,
+        "trigger_close": 178.81
+      }
+    },
+    "TIA-USDT-SWAP": {
+      "detected_at": "2026-10-03T17:10:49Z",
+      "diagnostic": {
+        "bias": "LONG",
+        "context_close": 0.4794,
+        "context_ema50": 0.45360068363196926,
+        "context_ema200": 0.42038322783147886,
+        "structure_close": 0.4723,
+        "structure_ema50": 0.4523563661987018,
+        "last_passed": "REENTRY",
+        "stopped_at": "CONFIRMATION",
+        "reference_count": 21,
+        "reference_level": 0.4422,
+        "sweep_depth_percent": 0.2035278154681041,
+        "sweep_start_ms": 1791014400000,
+        "reentry_start_ms": 1791036000000,
+        "reentry_level": 0.4648,
+        "trace_matches_decision": true,
+        "trigger_start_ms": 1791045900000,
+        "trigger_close": 0.4723
+      }
+    },
+    "WLD-USDT-SWAP": {
+      "detected_at": "2026-10-03T17:10:50Z",
+      "diagnostic": {
+        "bias": "LONG",
+        "context_close": 0.5974,
+        "context_ema50": 0.5161923430856922,
+        "context_ema200": 0.45429931296954945,
+        "structure_close": 0.596,
+        "structure_ema50": 0.5577342947970103,
+        "last_passed": "REENTRY",
+        "stopped_at": "CONFIRMATION",
+        "reference_count": 20,
+        "reference_level": 0.5592,
+        "sweep_depth_percent": 0.5185979971387721,
+        "sweep_start_ms": 1791011700000,
+        "reentry_start_ms": 1791016200000,
+        "reentry_level": 0.5655,
+        "trace_matches_decision": true,
+        "trigger_start_ms": 1791045900000,
+        "trigger_close": 0.596
+      }
+    },
+    "WIF-USDT-SWAP": {
+      "detected_at": "2026-10-03T17:10:51Z",
+      "diagnostic": {
+        "bias": "LONG",
+        "context_close": 0.2539,
+        "context_ema50": 0.2434281313987431,
+        "context_ema200": 0.2230095722338901,
+        "structure_close": 0.2543,
+        "structure_ema50": 0.2487117325145803,
+        "last_passed": "REENTRY",
+        "stopped_at": "CONFIRMATION",
+        "reference_count": 19,
+        "reference_level": 0.2439,
+        "sweep_depth_percent": 0.08200082000820243,
+        "sweep_start_ms": 1791012600000,
+        "reentry_start_ms": 1791022500000,
+        "reentry_level": 0.2482,
+        "trace_matches_decision": true,
+        "trigger_start_ms": 1791045900000,
+        "trigger_close": 0.2543
+      }
+    },
+    "STRK-USDT-SWAP": {
+      "detected_at": "2026-10-03T17:10:52Z",
+      "diagnostic": {
+        "bias": "LONG",
+        "context_close": 0.04919,
+        "context_ema50": 0.042196589247306876,
+        "context_ema200": 0.03654456832573104,
+        "structure_close": 0.05027,
+        "structure_ema50": 0.04364096185376951,
+        "last_passed": "REENTRY",
+        "stopped_at": "CONFIRMATION",
+        "reference_count": 22,
+        "reference_level": 0.04278,
+        "sweep_depth_percent": 0.3973819541841901,
+        "sweep_start_ms": 1791012600000,
+        "reentry_start_ms": 1791022500000,
+        "reentry_level": 0.04416,
+        "trace_matches_decision": true,
+        "trigger_start_ms": 1791045900000,
+        "trigger_close": 0.05027
+      }
+    },
+    "VIRTUAL-USDT-SWAP": {
+      "detected_at": "2026-10-03T17:10:53Z",
+      "diagnostic": {
+        "bias": "LONG",
+        "context_close": 0.8031,
+        "context_ema50": 0.7798415877374921,
+        "context_ema200": 0.7340596214358565,
+        "structure_close": 0.7942,
+        "structure_ema50": 0.7846287928157485,
+        "last_passed": "REENTRY",
+        "stopped_at": "CONFIRMATION",
+        "reference_count": 23,
+        "reference_level": 0.7576,
+        "sweep_depth_percent": 0.09239704329461905,
+        "sweep_start_ms": 1791014400000,
+        "reentry_start_ms": 1791024300000,
+        "reentry_level": 0.7875,
+        "trace_matches_decision": true,
+        "trigger_start_ms": 1791045900000,
+        "trigger_close": 0.7942
+      }
+    },
+    "ENA-USDT-SWAP": {
+      "detected_at": "2026-10-03T17:10:53Z",
+      "diagnostic": {
+        "bias": "NEUTRAL",
+        "context_close": 0.23332,
+        "context_ema50": 0.24380422557337378,
+        "context_ema200": 0.20422262857223517,
+        "structure_close": 0.23427,
+        "structure_ema50": 0.24001367405775093,
+        "last_passed": "DATA",
+        "stopped_at": "BIAS",
+        "trace_matches_decision": true,
+        "trigger_start_ms": 1791045900000,
+        "trigger_close": 0.23427
+      }
+    },
+    "YGG-USDT-SWAP": {
+      "detected_at": "2026-10-03T17:10:54Z",
+      "diagnostic": {
+        "bias": "LONG",
+        "context_close": 0.0274,
+        "context_ema50": 0.026875197424336455,
+        "context_ema200": 0.02519864346496009,
+        "structure_close": 0.0274,
+        "structure_ema50": 0.0273996658957022,
+        "last_passed": "REENTRY",
+        "stopped_at": "CONFIRMATION",
+        "reference_count": 23,
+        "reference_level": 0.02732,
+        "sweep_depth_percent": 0.4392386530014716,
+        "sweep_start_ms": 1791030600000,
+        "reentry_start_ms": 1791044100000,
+        "reentry_level": 0.02748,
+        "trace_matches_decision": true,
+        "trigger_start_ms": 1791045900000,
+        "trigger_close": 0.0274
+      }
+    }
+  }
+}
