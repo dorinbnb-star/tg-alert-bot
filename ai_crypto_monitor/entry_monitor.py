@@ -159,6 +159,15 @@ def append_scan_error(error: str) -> None:
     append_diagnostic({"stopped_at": "SCAN_ERROR", "reason": error}, "SCAN_ERROR", symbol)
 
 
+def symbol_scan_error(symbol: str, error: str) -> dict:
+    trace = {"stopped_at": "SCAN_ERROR", "reason": error}
+    append_diagnostic(trace, "SCAN_ERROR", symbol)
+    result = {"status": "SCAN_ERROR", "symbol": symbol, "reason": error}
+    if diagnostic_paths() is not None:
+        result["diagnostic"] = {"symbol": symbol, **trace}
+    return result
+
+
 def load_env_file(path: Path | None) -> dict[str, str]:
     values: dict[str, str] = {}
     if path is None:
@@ -803,11 +812,23 @@ def scan_once(
             continue
         symbol_config = dict(config)
         symbol_config["symbol"] = symbol
-        results.append(scan_symbol(root, client, dry_run, symbol_config, rules, dedup, sender))
+        try:
+            result = scan_symbol(root, client, dry_run, symbol_config, rules, dedup, sender)
+        except TelegramError as exc:
+            symbol_scan_error(symbol, str(exc))
+            setattr(exc, "symbol_diagnostic_recorded", True)
+            raise
+        except MonitorError as exc:
+            result = symbol_scan_error(symbol, str(exc))
+        results.append(result)
+        if result["status"] == "SENT":
+            write_alert_sent_output()
     if not results:
         raise MonitorError("Lista symbols nu contine simboluri valide")
     statuses = [result["status"] for result in results]
-    if "SENT" in statuses:
+    if all(item == "SCAN_ERROR" for item in statuses):
+        status = "SCAN_ERROR"
+    elif "SENT" in statuses:
         status = "SENT"
     elif "ENTRY_READY_DRY_RUN" in statuses:
         status = "ENTRY_READY_DRY_RUN"
@@ -817,7 +838,15 @@ def scan_once(
         status = "ENTRY_SKIPPED"
     else:
         status = "NO_ENTRY"
-    return {"status": status, "results": results}
+    return {"status": status, "results": results, "alert_sent": "SENT" in statuses}
+
+
+def write_alert_sent_output() -> None:
+    output_path = os.getenv("GITHUB_OUTPUT")
+    if not output_path:
+        return
+    with Path(output_path).open("a", encoding="utf-8") as handle:
+        handle.write("alert_sent=true\n")
 
 
 def write_github_outputs(result: dict) -> None:
@@ -825,9 +854,12 @@ def write_github_outputs(result: dict) -> None:
     if not output_path:
         return
     status = str(result.get("status", "UNKNOWN"))
+    alert_sent = bool(result.get("alert_sent")) or any(
+        item.get("status") == "SENT" for item in result.get("results", [])
+    )
     with Path(output_path).open("a", encoding="utf-8") as handle:
         handle.write(f"status={status}\n")
-        handle.write(f"alert_sent={'true' if status == 'SENT' else 'false'}\n")
+        handle.write(f"alert_sent={'true' if alert_sent else 'false'}\n")
 
 
 def write_step_summary(result: dict | None = None, error: str | None = None) -> None:
@@ -841,6 +873,11 @@ def write_step_summary(result: dict | None = None, error: str | None = None) -> 
         assert result is not None
         lines += [f"Rezultat: **{result.get('status', 'UNKNOWN')}**", ""]
         for item in result.get("results", []):
+            if item.get("status") == "SCAN_ERROR":
+                lines.append(
+                    f"- {item.get('symbol', 'UNKNOWN')}: **SCAN_ERROR** - `{item.get('reason', 'motiv necunoscut')}`"
+                )
+                continue
             signal = item.get("signal")
             if signal:
                 lines.append(
@@ -919,7 +956,7 @@ def main(argv: list[str] | None = None) -> int:
             write_github_outputs(result)
             write_step_summary(result)
             print(json.dumps(result, ensure_ascii=False, indent=2))
-            return 0
+            return 2 if result["status"] == "SCAN_ERROR" else 0
         interval = int(read_json(package_dir(root) / "config-v0.1.json")["scan_interval_seconds"])
         while True:
             try:
@@ -933,7 +970,8 @@ def main(argv: list[str] | None = None) -> int:
     except (MonitorError, TelegramError) as exc:
         if args.command == "scan":
             write_step_summary(error=str(exc))
-            append_scan_error(str(exc))
+            if not getattr(exc, "symbol_diagnostic_recorded", False):
+                append_scan_error(str(exc))
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
 
