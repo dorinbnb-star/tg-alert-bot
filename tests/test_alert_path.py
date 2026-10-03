@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sys
@@ -13,6 +14,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from ai_crypto_monitor import entry_monitor as monitor  # noqa: E402
+from ai_crypto_monitor import scan_diagnostics as diagnostics  # noqa: E402
 
 HOUR = 60 * 60_000
 QUARTER = 15 * 60_000
@@ -62,6 +64,10 @@ def copy_config(target: Path) -> None:
     package.mkdir(parents=True)
     for name in ("config-v0.1.json", "rules-v0.1.json"):
         shutil.copy(PROJECT_ROOT / "ai_crypto_monitor" / name, package / name)
+    config_path = package / "config-v0.1.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["symbols"] = ["BTC-USDT-SWAP"]
+    config_path.write_text(json.dumps(config), encoding="utf-8")
 
 
 class AlertDecisionTests(unittest.TestCase):
@@ -205,6 +211,158 @@ class SendModeTests(unittest.TestCase):
                 patch.object(monitor, "telegram_call", side_effect=AssertionError("must not send")):
             self.assertEqual(2, self.run_send())
         self.assertFalse((self.root / "ai_crypto_monitor" / "state" / "dedup.json").exists())
+
+
+class MultiSymbolIsolationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.root = Path(self.directory.name)
+        copy_config(self.root)
+        source_config = monitor.read_json(PROJECT_ROOT / "ai_crypto_monitor" / "config-v0.1.json")
+        config_path = self.root / "ai_crypto_monitor" / "config-v0.1.json"
+        config = monitor.read_json(config_path)
+        config["symbols"] = source_config["symbols"]
+        monitor.write_json(config_path, config)
+        self.symbols = list(config["symbols"])
+        self.output = self.root / "github-output"
+        self.summary = self.root / "step-summary.md"
+        self.log = self.root / "scan-diagnostics.jsonl"
+        self.current = self.root / "current-scan-diagnostic.jsonl"
+        self.meta = self.root / "scan-diagnostics-meta.json"
+        diagnostics.prepare(self.log, self.meta, self.current, "")
+        self.env = patch.dict(os.environ, {
+            "GITHUB_OUTPUT": str(self.output),
+            "GITHUB_STEP_SUMMARY": str(self.summary),
+            "GITHUB_ACTIONS": "true",
+            "GITHUB_RUN_ID": "500",
+            "GITHUB_RUN_ATTEMPT": "1",
+            "GITHUB_REF_NAME": "codex/expand-watchlist-18",
+            "GITHUB_EVENT_NAME": "workflow_dispatch",
+            "SCAN_DIAGNOSTICS_FILE": str(self.log),
+            "SCAN_DIAGNOSTICS_CURRENT": str(self.current),
+            "SCAN_DIAGNOSTICS_META": str(self.meta),
+            "SCAN_DIAGNOSTICS_SYMBOL": "BTC-USDT-SWAP",
+        }, clear=False)
+        self.env.start()
+        os.environ.pop("TELEGRAM_TOKEN", None)
+        os.environ.pop("TELEGRAM_CHAT_ID", None)
+
+    def tearDown(self) -> None:
+        self.env.stop()
+        self.directory.cleanup()
+
+    def diagnostic_rows(self) -> list[dict]:
+        return [json.loads(line) for line in self.current.read_text(encoding="utf-8").splitlines() if line]
+
+    def entry_signature(self, symbol: str) -> str:
+        config = monitor.read_json(self.root / "ai_crypto_monitor" / "config-v0.1.json")
+        config["symbol"] = symbol
+        signal = monitor.detect_entry(
+            synthetic_market()["context"], synthetic_market()["structure"], synthetic_market()["trigger"],
+            monitor.read_json(self.root / "ai_crypto_monitor" / "rules-v0.1.json"), config,
+        )
+        assert signal is not None
+        return signal.signature
+
+    def test_third_symbol_error_keeps_other_seventeen_and_all_diagnostics(self) -> None:
+        failed_symbol = self.symbols[2]
+
+        def fetch(_client, config):
+            if config["symbol"] == failed_symbol:
+                raise monitor.MonitorError("date incomplete")
+            return END_MS + 60_000, synthetic_market(confirm_close=100.3)
+
+        with patch.object(monitor, "fetch_closed_market", side_effect=fetch):
+            result = monitor.scan_once(self.root, object(), True)
+        monitor.write_step_summary(result)
+        rows = self.diagnostic_rows()
+        self.assertEqual(18, len(result["results"]))
+        self.assertEqual(17, sum(item["status"] != "SCAN_ERROR" for item in result["results"]))
+        self.assertEqual(18, len(rows))
+        self.assertEqual(
+            {"status": "SCAN_ERROR", "symbol": failed_symbol, "reason": "date incomplete"},
+            {key: next(item for item in result["results"] if item["status"] == "SCAN_ERROR")[key]
+             for key in ("status", "symbol", "reason")},
+        )
+        self.assertEqual("SCAN_ERROR", next(row for row in rows if row["symbol"] == failed_symbol)["status"])
+        self.assertIn(f"{failed_symbol}: **SCAN_ERROR** - `date incomplete`", self.summary.read_text(encoding="utf-8"))
+
+    def test_sent_second_symbol_then_third_symbol_error_persists_output_and_dedup(self) -> None:
+        sent_symbol, failed_symbol = self.symbols[1], self.symbols[2]
+        os.environ.update({"TELEGRAM_TOKEN": TOKEN, "TELEGRAM_CHAT_ID": "42"})
+
+        def fetch(_client, config):
+            if config["symbol"] == failed_symbol:
+                raise monitor.MonitorError("HTTP 503 la /api/v5/market/candles")
+            confirm = 101.0 if config["symbol"] == sent_symbol else 100.3
+            return END_MS + 60_000, synthetic_market(confirm_close=confirm)
+
+        with patch.object(monitor, "OkxClient", return_value=object()), \
+                patch.object(monitor, "fetch_closed_market", side_effect=fetch), \
+                patch.object(monitor, "final_entry_check", return_value=(END_MS + 60_000, 101.02)), \
+                patch.object(monitor, "require_delivery_identity", return_value={}), \
+                patch.object(monitor, "telegram_call", return_value={"message_id": 7}):
+            self.assertEqual(0, monitor.main(["scan", "--root", str(self.root), "--send"]))
+
+        rows = self.diagnostic_rows()
+        dedup = monitor.read_json(self.root / "ai_crypto_monitor" / "state" / "dedup.json")
+        self.assertEqual(18, len(rows))
+        self.assertEqual("SCAN_ERROR", next(row for row in rows if row["symbol"] == failed_symbol)["status"])
+        self.assertIn("alert_sent=true", self.output.read_text(encoding="utf-8"))
+        self.assertIn(self.entry_signature(sent_symbol), dedup["sent"])
+
+    def test_prior_alert_survives_later_telegram_error(self) -> None:
+        sent_symbol, failed_symbol = self.symbols[1], self.symbols[2]
+        os.environ.update({"TELEGRAM_TOKEN": TOKEN, "TELEGRAM_CHAT_ID": "42"})
+
+        def fetch(_client, config):
+            confirm = 101.0 if config["symbol"] in {sent_symbol, failed_symbol} else 100.3
+            return END_MS + 60_000, synthetic_market(confirm_close=confirm)
+
+        telegram_calls = 0
+
+        def send(_token, method, _params=None):
+            nonlocal telegram_calls
+            if method != "sendMessage":
+                raise AssertionError(f"unexpected Telegram method: {method}")
+            telegram_calls += 1
+            if telegram_calls == 2:
+                raise monitor.TelegramError("Telegram sendMessage esuat: HTTP 502")
+            return {"message_id": 7}
+
+        with patch.object(monitor, "OkxClient", return_value=object()), \
+                patch.object(monitor, "fetch_closed_market", side_effect=fetch), \
+                patch.object(monitor, "final_entry_check", return_value=(END_MS + 60_000, 101.02)), \
+                patch.object(monitor, "require_delivery_identity", return_value={}), \
+                patch.object(monitor, "telegram_call", side_effect=send):
+            self.assertEqual(2, monitor.main(["scan", "--root", str(self.root), "--send"]))
+
+        rows = self.diagnostic_rows()
+        by_symbol = {row["symbol"]: row for row in rows}
+        dedup = monitor.read_json(self.root / "ai_crypto_monitor" / "state" / "dedup.json")
+        self.assertEqual(3, len(rows))
+        self.assertEqual("NO_ENTRY", by_symbol[self.symbols[0]]["status"])
+        self.assertEqual("SENT", by_symbol[sent_symbol]["status"])
+        self.assertEqual("SCAN_ERROR", by_symbol[failed_symbol]["status"])
+        self.assertEqual("Telegram sendMessage esuat: HTTP 502", by_symbol[failed_symbol]["reason"])
+        self.assertIn("alert_sent=true", self.output.read_text(encoding="utf-8"))
+        self.assertIn(self.entry_signature(sent_symbol), dedup["sent"])
+        self.assertNotIn(self.entry_signature(failed_symbol), dedup["sent"])
+
+    def test_all_symbols_error_returns_exit_code_two(self) -> None:
+        def fetch(_client, config):
+            raise monitor.MonitorError(f"date vechi pentru {config['symbol']}")
+
+        with patch.object(monitor, "OkxClient", return_value=object()), \
+                patch.object(monitor, "fetch_closed_market", side_effect=fetch):
+            self.assertEqual(2, monitor.main(["scan", "--root", str(self.root), "--dry-run"]))
+
+        rows = self.diagnostic_rows()
+        self.assertEqual(18, len(rows))
+        self.assertTrue(all(row["status"] == "SCAN_ERROR" for row in rows))
+        output = self.output.read_text(encoding="utf-8")
+        self.assertIn("status=SCAN_ERROR", output)
+        self.assertIn("alert_sent=false", output)
 
 
 if __name__ == "__main__":

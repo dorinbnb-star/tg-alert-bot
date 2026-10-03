@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shutil
 import sys
 import tempfile
@@ -45,6 +46,10 @@ def copy_config(target: Path) -> None:
     package.mkdir(parents=True)
     for name in ("config-v0.1.json", "rules-v0.1.json"):
         shutil.copy(PROJECT_ROOT / "ai_crypto_monitor" / name, package / name)
+    config_path = package / "config-v0.1.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["symbols"] = ["BTC-USDT-SWAP"]
+    config_path.write_text(json.dumps(config), encoding="utf-8")
 
 
 def candle(start_ms: int, close: float, *, high: float | None = None, low: float | None = None) -> monitor.Candle:
@@ -75,6 +80,18 @@ class EntryMonitorTests(unittest.TestCase):
             "entry_valid_seconds": 300,
             "probability_label": "NECALIBRATA",
         }
+
+    def test_configured_watchlist_is_exact_and_duplicate_free(self) -> None:
+        config = monitor.read_json(PROJECT_ROOT / "ai_crypto_monitor" / "config-v0.1.json")
+        expected = [
+            "BTC-USDT-SWAP", "ETH-USDT-SWAP", "SOL-USDT-SWAP", "XRP-USDT-SWAP",
+            "BNB-USDT-SWAP", "AVAX-USDT-SWAP", "LINK-USDT-SWAP", "LTC-USDT-SWAP",
+            "SUI-USDT-SWAP", "UNI-USDT-SWAP", "AAVE-USDT-SWAP", "TIA-USDT-SWAP",
+            "WLD-USDT-SWAP", "WIF-USDT-SWAP", "STRK-USDT-SWAP", "VIRTUAL-USDT-SWAP",
+            "ENA-USDT-SWAP", "YGG-USDT-SWAP",
+        ]
+        self.assertEqual(expected, config["symbols"])
+        self.assertEqual(len(expected), len(set(config["symbols"])))
 
     def test_no_trigger_produces_no_entry(self) -> None:
         hour = 60 * 60_000
