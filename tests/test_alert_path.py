@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sys
@@ -62,6 +63,10 @@ def copy_config(target: Path) -> None:
     package.mkdir(parents=True)
     for name in ("config-v0.1.json", "rules-v0.1.json"):
         shutil.copy(PROJECT_ROOT / "ai_crypto_monitor" / name, package / name)
+    config_path = package / "config-v0.1.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["symbols"] = ["BTC-USDT-SWAP"]
+    config_path.write_text(json.dumps(config), encoding="utf-8")
 
 
 class AlertDecisionTests(unittest.TestCase):

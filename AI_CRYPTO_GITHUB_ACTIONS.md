@@ -16,7 +16,7 @@ Rezultatul fiecarei scanari apare in GitHub Step Summary. Testele `tests/test_wo
 Scannerul:
 
 - foloseste endpointurile publice OKX (`https://www.okx.com/api/v5`), fara API key; Bybit raspunde HTTP 403 de pe runnerele GitHub;
-- porneste cu `BTC-USDT-SWAP`, configurabil in `ai_crypto_monitor/config-v0.1.json` la `symbols`;
+- scaneaza 18 contracte perpetue USDT active pe OKX, configurate in `ai_crypto_monitor/config-v0.1.json` la `symbols`;
 - foloseste context 4H, structura 1H si ultima lumanare 15m inchisa pentru trigger; lumanarile OKX cu `confirm != "1"` sunt excluse;
 - scrie rezultatul fiecarei rulari (inclusiv `NO_ENTRY` si erorile) in GitHub Step Summary, nu in Telegram;
 - cere sweep, revenire, confirmare, Entry, SL structural, TP structural si R:R minim;
@@ -60,7 +60,7 @@ Semnatura unui semnal include simbolul, directia, pivotul 1H, lumanarea de sweep
 
 Diagnosticul este separat de `dedup.json` si nu schimba decizia, alerta sau configuratia strategiei. Decizia se calculeaza intai fara trace; o a doua evaluare produce numai explicatia. Daca trace-ul esueaza, semnalul si livrarea raman neschimbate.
 
-Pentru fiecare scanare si simbol, randul JSONL contine biasul si valorile EMA, ultima etapa trecuta, filtrul la care s-a oprit, datele celui mai avansat candidat (sweep, entry, SL, TP si R:R), varsta confirmarii si un R:R shadow pentru al doilea pivot 1H. Campul shadow nu participa la decizie. In v0.1 lista `symbols` contine numai `BTC-USDT-SWAP`; frecventa observata nu trebuie interpretata ca frecventa intregii piete.
+Pentru fiecare scanare si simbol, randul JSONL contine biasul si valorile EMA, ultima etapa trecuta, filtrul la care s-a oprit, datele celui mai avansat candidat (sweep, entry, SL, TP si R:R), varsta confirmarii si un R:R shadow pentru al doilea pivot 1H. Campul shadow nu participa la decizie. Raportul trebuie analizat separat pentru fiecare simbol: pragurile v0.1 au fost definite initial pentru BTC, iar simbolurile adaugate ulterior au un istoric mai scurt si volatilitati diferite.
 
 Istoricul cumulativ este restaurat si salvat la fiecare scanare activa intr-un cache separat, cu prefixul `ai-crypto-diag-v1-<branch>-`. Fiecare rulare publica separat `scan-diag-<run_id>-<attempt>`, pastrat 14 zile, astfel incat datele sa poata fi reconstruite daca dispare cache-ul. Un pas final cu `always()` scrie `SCAN_ERROR` cand testele, scannerul sau procesul se opresc inainte sa produca randul normal. `cache_reset`, `restored_rows`, `run_id` si `run_attempt` fac intreruperile de persistenta vizibile.
 
