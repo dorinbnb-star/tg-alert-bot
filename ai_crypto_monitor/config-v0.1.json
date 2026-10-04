@@ -33,6 +33,7 @@
   "maximum_entry_drift_percent": 0.15,
   "scan_interval_seconds": 60,
   "dedup_ttl_hours": 168,
+  "outcome_timeout_hours": 72,
   "closed_candle_grace_seconds": 3,
   "probability_label": "NECALIBRATA",
   "notes": "Pragurile sunt ipoteze operationale configurabile, nu avantaj demonstrat."

@@ -2,13 +2,13 @@
 
 Workflow: `.github/workflows/ai-crypto-trader.yml`.
 
-## Stare curenta: alerte Telegram doar pentru ENTRY confirmat
+## Stare curenta: alerte Telegram pentru ENTRY confirmat si rezultatul teoretic
 
 Workflow-ul este declansat la fiecare 10 minute (vezi `Programare`) si ruleaza scannerul numai intre `08:00` inclusiv si `22:00` exclusiv in fusul `Europe/Brussels`. In intervalul `22:00-07:59` nu se ruleaza testele si nu se apeleaza OKX; se face doar checkout pentru planificatorul `scheduler/cadence.py`.
 
 Doua cai, care se exclud reciproc:
 
-- **Live** (pasul `Live scan`): numai pe `main` si numai pentru ticurile pornite de `schedule` sau de lantul insusi (`github-actions[bot]`). Este singurul pas care citeste secretele `TELEGRAM_TOKEN` si `TELEGRAM_CHAT_ID` si singurul care ruleaza `--send`. Trimite pe Telegram numai cand exista `NOW=ENTER` cu setup complet confirmat; pentru `NO_ENTRY`, setup neconfirmat, semnal expirat sau duplicat nu trimite nimic. Nu exista mesaje WATCH, startup, heartbeat, periodice sau de eroare.
+- **Live** (pasul `Live scan`): numai pe `main` si numai pentru ticurile pornite de `schedule` sau de lantul insusi (`github-actions[bot]`). Este singurul pas care citeste secretele `TELEGRAM_TOKEN` si `TELEGRAM_CHAT_ID` si singurul care ruleaza `--send`. Trimite numai pentru un entry complet confirmat sau pentru rezultatul teoretic TP/SL/timeout al unei alerte acceptate anterior. Pentru `NO_ENTRY`, setup neconfirmat, semnal expirat sau duplicat nu trimite nimic. Nu exista mesaje WATCH, startup, heartbeat, periodice sau de eroare.
 - **Dry-run** (pasul `Dry-run scan`): orice `Run workflow` manual, orice re-run pornit de o persoana si orice alt branch. Nu vede secretele si nu poate trimite.
 
 Rezultatul fiecarei scanari apare in GitHub Step Summary. Testele `tests/test_workflow.py` si `tests/test_alert_path.py` verifica aceste reguli la fiecare tic activ.
@@ -26,21 +26,42 @@ Scannerul:
 Formatul alertei (exemplu sintetic din teste, nu semnal real):
 
 ```
-NOW=ENTER LONG BTC-USDT-SWAP
-BIAS: LONG (trend 4H si 1H peste EMA50)
-SETUP: sweep low 1H <nivel pivot> + reintrare + confirmare 15m
-TRIGGER: lumanarea 15m HH:MM-HH:MM (Bruxelles) a inchis la <pret>, peste maximul lumanarii de reintrare <nivel>
-Entry: <pret> (pret verificat <pret live>)
-SL / invalidare: <nivel> (sub extremul sweep <nivel>)
-TP: <primul pivot 1H opus>
-R:R: <valoare>
-Pro: <EMA 4H/1H, adancime sweep, R:R>
-Contra: <limitari: fara OI/CVD/heatmap, TP partial, R:R aproape de minim, drift>
-Valabil pana la HH:MM (Bruxelles). Probabilitate: necalibrata.
-Date: OKX, lumanari inchise 4H/1H/15m. Doar alerta, fara ordine automate.
+🟢 AAVE LONG
+
+Entry teoretic: 179.12
+Preț verificat: 178.95
+SL: 177.72
+TP: 182.75
+R:R: 2.59
+Valabil până la: 20:07
+Status: PENDING
 ```
 
-Nu exista calibrare a probabilitatii pe date istorice; alerta spune explicit `Probabilitate: necalibrata` si nu afiseaza scoruri ca probabilitati.
+Pentru SHORT se foloseste marcajul rosu, iar simbolul este afisat fara sufixul `-USDT-SWAP`. R:R afisat este R:R-ul strategiei (`strategy_rr`), exact valoarea comparata cu pragul de intrare. R:R calculat fata de `Pret verificat` ramane separat in diagnostic drept `tracking_rr` si este baza urmaririi rezultatului teoretic. BIAS, SETUP, TRIGGER, Pro, Contra si eticheta `NECALIBRATA` raman in JSONL si Step Summary, nu in Telegram. Scorul de confluenta nu este tratat ca probabilitate.
+
+La 2026-10-04, `minimum_rr_for_enter` din `rules-v0.1.json` a fost ridicat de la `1.8` la `3.0`. Nicio alta regula sau limita a strategiei nu a fost schimbata; orice alerta trimisa are `strategy_rr >= 3.0`.
+
+Precizia tuturor preturilor afisate vine din `tickSz`, citit o singura data pe rulare din endpointul public `/api/v5/public/instruments?instType=SWAP`. Valorile interne nu sunt rotunjite. Daca endpointul de instrumente esueaza, scanarea continua cu un fallback de sase cifre semnificative.
+
+## Urmarirea rezultatului teoretic
+
+O alerta acceptata de Telegram deschide o urmarire teoretica la `Pret verificat`; botul nu presupune ca utilizatorul a executat tranzactia. La fiecare tic live sunt citite high/low-urile lumanarilor complet inchise dupa ultima verificare. Pentru LONG, low la SL inchide cu `-1R`, iar high la TP inchide cu R:R urmarit; pentru SHORT regulile sunt inversate. Daca TP si SL apar in aceeasi lumanare, rezultatul este SL.
+
+OKX ofera lumanari publice `1s` pentru SWAP. Trackerul ignora orice lumanare care a inceput inaintea alertei: foloseste 1s pana la primul minut complet, 1m pana la urmatoarea granita 15m si apoi 15m. Ramane o limita inevitabila mai mica de o secunda intre verificarea pretului si prima lumanare 1s completa; acea fractiune nu este atribuita retroactiv. La final se folosesc din nou 1m/1s, astfel incat timeout-ul sa ramana la 72 de ore de la acceptarea alertei.
+
+Timeout-ul este parametrul operational `outcome_timeout_hours` din `config-v0.1.json`, nu prag de strategie. Daca TP si SL nu sunt atinse in 72 ore, rezultatul foloseste tickerul curent si R calculat fata de pretul verificat. Mesajele de rezultat sunt:
+
+```
+✅ AAVE LONG: TP HIT (+2.59R)
+❌ AAVE LONG: SL HIT (−1R)
+⏱ AAVE LONG: ÎNCHIS LA TIMEOUT (+0.34R la prețul curent 179.73)
+```
+
+Noaptea nu ruleaza scannerul. Atingerile dintre `22:00` si `08:00` sunt recuperate cronologic din lumanarile istorice, iar mesajul rezultatului pleaca la primul tic activ de dupa `08:00`.
+
+Starea `ai_crypto_monitor/state/alert-outcomes.json` este separata de `dedup.json` si de diagnostic. Contine alertele deschise si tombstone-uri pentru rezultatele deja trimise. Cache-ul are o cheie noua la fiecare rulare; artifactul `open-alert-state`, pastrat 30 de zile, este rezerva. Daca lipseste cache-ul, workflow-ul recupereaza ultimul artifact de pe acelasi branch. Pentru aceasta operatie numai jobul `monitor` are permisiunea suplimentara `actions: read`; nu exista alta permisiune noua. Daca lipsesc si cache-ul si artifactul, starea porneste goala, scrie `TRACKING_STATE_LOST` in diagnostic si nu reconstruieste sau retrimite rezultate vechi.
+
+Starea unui rezultat este mutata in `resolved` numai dupa ce Telegram accepta mesajul. La refuz Telegram, alerta ramane deschisa pentru reincercare. Exista acelasi risc rezidual ca la dedup: o cadere a runnerului dupa acceptarea Telegram, dar inainte de salvarea cache-ului/artifactului, poate permite o repetare.
 
 ## Secrete GitHub
 
@@ -54,7 +75,7 @@ Secretele se creeaza in `Settings` > `Secrets and variables` > `Actions` > `Repo
 
 ## Deduplicare
 
-Semnatura unui semnal include simbolul, directia, pivotul 1H, lumanarea de sweep si lumanarea 15m de confirmare. Pe calea live, starea `ai_crypto_monitor/state/dedup.json` este restaurata din cache-ul GitHub Actions (`ai-crypto-dedup-<branch>-*`) si salvata intr-un cache nou numai dupa ce Telegram a acceptat alerta (`alert_sent=true`). Acelasi setup confirmat nu poate alerta de doua ori. Risc rezidual: daca Telegram accepta alerta, dar salvarea cache-ului esueaza, un tic ulterior din fereastra de 420 s ar putea repeta alerta; esecul se vede in log. In dry-run nu se scrie si nu se salveaza starea. `concurrency` (grupul `ai-crypto-trader-entry-monitor-${{ github.ref }}`) nu permite doua scanari simultane pe acelasi branch.
+Semnatura structurala a unui semnal include numai simbolul, directia si identitatea pivotului 1H (`reference_confirmed_at_ms`). Sweep-uri sau confirmari ulterioare pe acelasi pivot nu produc o alerta noua. Pe calea live, aceeasi semnatura este verificata atat in `dedup.json`, cat si in alertele deschise si tombstone-urile rezolvate din `alert-outcomes.json`. Starea `ai_crypto_monitor/state/dedup.json` este restaurata din cache-ul GitHub Actions (`ai-crypto-dedup-<branch>-*`) si salvata intr-un cache nou numai dupa ce Telegram a acceptat alerta (`alert_sent=true`). Risc rezidual: daca Telegram accepta alerta, dar salvarea cache-ului esueaza, un tic ulterior din fereastra de 420 s ar putea repeta alerta; esecul se vede in log. In dry-run nu se scrie si nu se salveaza starea. `concurrency` (grupul `ai-crypto-trader-entry-monitor-${{ github.ref }}`) nu permite doua scanari simultane pe acelasi branch.
 
 ## Diagnostic de strategie (experiment de 7 zile)
 

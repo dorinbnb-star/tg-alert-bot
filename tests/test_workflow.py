@@ -28,7 +28,7 @@ FORBIDDEN = (
 )
 NEVER = ("api.telegram.org", "--env-file", "verify-telegram", "test-telegram", "sleep")
 LIVE_PATH = "github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.triggering_actor == 'github-actions[bot]')"
-LIVE_STEP = "Live scan (OKX public candles, Telegram only on NOW=ENTER, writes Step Summary)"
+LIVE_STEP = "Live scan (OKX public candles, Telegram only on confirmed entry or result, writes Step Summary)"
 DRY_STEP = "Dry-run scan (OKX public candles, no Telegram, writes Step Summary)"
 
 
@@ -87,11 +87,11 @@ class WorkflowDryRunOnlyTests(unittest.TestCase):
         dispatch_source = (PROJECT_ROOT / "scheduler" / "dispatch.py").read_text(encoding="utf-8")
         self.assertEqual(1, dispatch_source.count("sleeper(RETRY_DELAYS"))
 
-    def test_monitor_runs_after_wait_or_seed_and_is_read_only(self) -> None:
+    def test_monitor_runs_after_wait_or_seed_with_only_required_read_permissions(self) -> None:
         monitor = jobs()["monitor"]
         self.assertIn("    needs: wait\n", monitor)
         self.assertIn("    if: ${{ !cancelled() && (needs.wait.result == 'success' || needs.wait.result == 'skipped') }}\n", monitor)
-        self.assertIn("    permissions:\n      contents: read\n", monitor)
+        self.assertIn("    permissions:\n      actions: read\n      contents: read\n", monitor)
         self.assertNotIn(": write", monitor)
 
     def test_next_tick_dispatches_same_workflow_on_same_ref_with_ephemeral_token_only(self) -> None:
@@ -175,6 +175,26 @@ class WorkflowDryRunOnlyTests(unittest.TestCase):
             self.assertIn("path: ai_crypto_monitor/state/dedup.json", body)
             self.assertIn("key: ai-crypto-dedup-${{ github.ref_name }}-${{ github.run_id }}", body)
         self.assertIn("id: live\n", steps[LIVE_STEP])
+
+    def test_outcome_state_has_live_only_cache_artifact_recovery_and_backup(self) -> None:
+        steps = monitor_steps()
+        restore = steps["Restore persistent outcome state"]
+        recover = steps["Recover outcome state from artifact backup"]
+        save = steps["Save persistent outcome state"]
+        upload = steps["Upload outcome state backup"]
+        for body in (restore, recover, save, upload):
+            self.assertIn(LIVE_PATH, body)
+        self.assertIn("uses: actions/cache/restore@v4", restore)
+        self.assertIn("ai-crypto-outcomes-v1-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}", restore)
+        self.assertIn("ai_crypto_monitor/state/alert-outcomes.json", restore)
+        self.assertIn("steps.outcome-restore.outputs.cache-matched-key == ''", recover)
+        self.assertIn("GITHUB_TOKEN: ${{ github.token }}", recover)
+        self.assertIn("outcome_tracking restore-artifact", recover)
+        self.assertIn("uses: actions/cache/save@v4", save)
+        self.assertIn("uses: actions/upload-artifact@v4", upload)
+        self.assertIn("name: open-alert-state", upload)
+        self.assertIn("retention-days: 30", upload)
+        self.assertNotIn("secrets.", restore + recover + save + upload)
 
     def test_diagnostics_are_separate_persistent_and_uploaded_for_every_active_run(self) -> None:
         steps = monitor_steps()
