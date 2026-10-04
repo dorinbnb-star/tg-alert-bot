@@ -100,10 +100,7 @@ class EntrySignal:
 
     @property
     def signature(self) -> str:
-        raw = (
-            f"{self.symbol}|{self.direction}|{self.reference_confirmed_at_ms}|"
-            f"{self.sweep_start_ms}|{self.confirmation_start_ms}"
-        )
+        raw = f"{self.symbol}|{self.direction}|{self.reference_confirmed_at_ms}"
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
@@ -841,7 +838,6 @@ def format_entry_alert(
     formatter: PriceFormatter | None = None,
 ) -> str:
     formatter = formatter or PriceFormatter({})
-    rr = tracked_rr(signal, live_price)
     display = lambda value: formatter.format(signal.symbol, value)
     marker = "🟢" if signal.direction == "LONG" else "🔴"
     return "\n".join([
@@ -851,7 +847,7 @@ def format_entry_alert(
         f"Preț verificat: {display(live_price)}",
         f"SL: {display(signal.stop)}",
         f"TP: {display(signal.target)}",
-        f"R:R: {rr:.2f}",
+        f"R:R: {signal.rr:.2f}",
         f"Valabil până la: {local_hm(signal.expires_at_ms)}",
         "Status: PENDING",
     ])

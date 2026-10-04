@@ -69,7 +69,7 @@ def alert(
 
 
 class PriceFormattingTests(unittest.TestCase):
-    def test_exact_entry_alert_uses_verified_price_rr(self) -> None:
+    def test_exact_entry_alert_displays_strategy_rr(self) -> None:
         item = signal()
         formatter = monitor.PriceFormatter({"AAVE-USDT-SWAP": "0.01"})
         self.assertEqual(
@@ -80,7 +80,7 @@ class PriceFormattingTests(unittest.TestCase):
                 "Preț verificat: 178.95",
                 "SL: 177.72",
                 "TP: 182.75",
-                "R:R: 3.09",
+                "R:R: 2.59",
                 "Valabil până la: 20:07",
                 "Status: PENDING",
             ]),
@@ -126,7 +126,7 @@ class PriceFormattingTests(unittest.TestCase):
         self.assertIn("Preț verificat: 0.5940", message)
         self.assertIn("SL: 0.5916", message)
         self.assertIn("TP: 0.5997", message)
-        self.assertIn("R:R: 2.37", message)
+        self.assertIn("R:R: 2.59", message)
 
     def test_tick_size_api_failure_uses_six_significant_digit_fallback(self) -> None:
         class BrokenClient:

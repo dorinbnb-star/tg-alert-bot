@@ -32,12 +32,14 @@ Entry teoretic: 179.12
 Preț verificat: 178.95
 SL: 177.72
 TP: 182.75
-R:R: 3.09
+R:R: 2.59
 Valabil până la: 20:07
 Status: PENDING
 ```
 
-Pentru SHORT se foloseste marcajul rosu, iar simbolul este afisat fara sufixul `-USDT-SWAP`. R:R afisat este calculat fata de `Pret verificat`; R:R folosit de strategie ramane separat in diagnostic drept `strategy_rr`. BIAS, SETUP, TRIGGER, Pro, Contra si eticheta `NECALIBRATA` raman in JSONL si Step Summary, nu in Telegram. Scorul de confluenta nu este tratat ca probabilitate.
+Pentru SHORT se foloseste marcajul rosu, iar simbolul este afisat fara sufixul `-USDT-SWAP`. R:R afisat este R:R-ul strategiei (`strategy_rr`), exact valoarea comparata cu pragul de intrare. R:R calculat fata de `Pret verificat` ramane separat in diagnostic drept `tracking_rr` si este baza urmaririi rezultatului teoretic. BIAS, SETUP, TRIGGER, Pro, Contra si eticheta `NECALIBRATA` raman in JSONL si Step Summary, nu in Telegram. Scorul de confluenta nu este tratat ca probabilitate.
+
+La 2026-10-04, `minimum_rr_for_enter` din `rules-v0.1.json` a fost ridicat de la `1.8` la `3.0`. Nicio alta regula sau limita a strategiei nu a fost schimbata; orice alerta trimisa are `strategy_rr >= 3.0`.
 
 Precizia tuturor preturilor afisate vine din `tickSz`, citit o singura data pe rulare din endpointul public `/api/v5/public/instruments?instType=SWAP`. Valorile interne nu sunt rotunjite. Daca endpointul de instrumente esueaza, scanarea continua cu un fallback de sase cifre semnificative.
 
@@ -73,7 +75,7 @@ Secretele se creeaza in `Settings` > `Secrets and variables` > `Actions` > `Repo
 
 ## Deduplicare
 
-Semnatura unui semnal include simbolul, directia, pivotul 1H, lumanarea de sweep si lumanarea 15m de confirmare. Pe calea live, starea `ai_crypto_monitor/state/dedup.json` este restaurata din cache-ul GitHub Actions (`ai-crypto-dedup-<branch>-*`) si salvata intr-un cache nou numai dupa ce Telegram a acceptat alerta (`alert_sent=true`). Acelasi setup confirmat nu poate alerta de doua ori. Risc rezidual: daca Telegram accepta alerta, dar salvarea cache-ului esueaza, un tic ulterior din fereastra de 420 s ar putea repeta alerta; esecul se vede in log. In dry-run nu se scrie si nu se salveaza starea. `concurrency` (grupul `ai-crypto-trader-entry-monitor-${{ github.ref }}`) nu permite doua scanari simultane pe acelasi branch.
+Semnatura structurala a unui semnal include numai simbolul, directia si identitatea pivotului 1H (`reference_confirmed_at_ms`). Sweep-uri sau confirmari ulterioare pe acelasi pivot nu produc o alerta noua. Pe calea live, aceeasi semnatura este verificata atat in `dedup.json`, cat si in alertele deschise si tombstone-urile rezolvate din `alert-outcomes.json`. Starea `ai_crypto_monitor/state/dedup.json` este restaurata din cache-ul GitHub Actions (`ai-crypto-dedup-<branch>-*`) si salvata intr-un cache nou numai dupa ce Telegram a acceptat alerta (`alert_sent=true`). Risc rezidual: daca Telegram accepta alerta, dar salvarea cache-ului esueaza, un tic ulterior din fereastra de 420 s ar putea repeta alerta; esecul se vede in log. In dry-run nu se scrie si nu se salveaza starea. `concurrency` (grupul `ai-crypto-trader-entry-monitor-${{ github.ref }}`) nu permite doua scanari simultane pe acelasi branch.
 
 ## Diagnostic de strategie (experiment de 7 zile)
 

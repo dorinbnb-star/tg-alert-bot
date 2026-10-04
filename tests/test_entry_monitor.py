@@ -83,6 +83,7 @@ class EntryMonitorTests(unittest.TestCase):
 
     def test_configured_watchlist_is_exact_and_duplicate_free(self) -> None:
         config = monitor.read_json(PROJECT_ROOT / "ai_crypto_monitor" / "config-v0.1.json")
+        rules = monitor.read_json(PROJECT_ROOT / "ai_crypto_monitor" / "rules-v0.1.json")
         expected = [
             "BTC-USDT-SWAP", "ETH-USDT-SWAP", "SOL-USDT-SWAP", "XRP-USDT-SWAP",
             "BNB-USDT-SWAP", "AVAX-USDT-SWAP", "LINK-USDT-SWAP", "LTC-USDT-SWAP",
@@ -93,6 +94,7 @@ class EntryMonitorTests(unittest.TestCase):
         self.assertEqual(expected, config["symbols"])
         self.assertEqual(len(expected), len(set(config["symbols"])))
         self.assertEqual(72, config["outcome_timeout_hours"])
+        self.assertEqual(3.0, rules["minimum_rr_for_enter"])
 
     def test_no_trigger_produces_no_entry(self) -> None:
         hour = 60 * 60_000

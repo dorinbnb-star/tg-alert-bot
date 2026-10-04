@@ -11,7 +11,7 @@
   "confirmation_window_15m_candles": 2,
   "entry_window_15m_candles": 4,
   "invalidation_buffer_percent": 0.10,
-  "minimum_rr_for_enter": 1.8,
+  "minimum_rr_for_enter": 3.0,
   "active_expiry_15m_candles": 16,
   "probability_label": "NECALIBRATA",
   "notes": "Valorile numerice sunt ipoteze configurabile, nu avantaj demonstrat."

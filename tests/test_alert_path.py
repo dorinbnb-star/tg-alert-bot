@@ -6,6 +6,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -14,6 +15,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from ai_crypto_monitor import entry_monitor as monitor  # noqa: E402
+from ai_crypto_monitor import outcome_tracking as tracking  # noqa: E402
 from ai_crypto_monitor import scan_diagnostics as diagnostics  # noqa: E402
 
 HOUR = 60 * 60_000
@@ -87,6 +89,25 @@ class AlertDecisionTests(unittest.TestCase):
                     formatter=formatter,
                 )
 
+    def scan_fixed_signal(
+        self,
+        signal: monitor.EntrySignal,
+        directory: str,
+        sender,
+        *,
+        outcome_store: tracking.OutcomeStore | None = None,
+    ) -> dict:
+        dedup = monitor.DedupStore(Path(directory) / "dedup.json", ttl_hours=168)
+        config = dict(CONFIG, symbol=signal.symbol)
+        formatter = monitor.PriceFormatter({signal.symbol: "0.01"})
+        with patch.object(monitor, "fetch_closed_market", return_value=(END_MS + 60_000, synthetic_market())), \
+                patch.object(monitor, "detect_entry", return_value=signal), \
+                patch.object(monitor, "final_entry_check", return_value=(END_MS + 60_000, signal.entry)):
+            return monitor.scan_symbol(
+                Path(directory), object(), False, config, RULES, dedup, sender,
+                formatter=formatter, outcome_store=outcome_store,
+            )
+
     def test_confirmed_entry_sends_one_complete_alert(self) -> None:
         sent: list[str] = []
         with tempfile.TemporaryDirectory() as directory:
@@ -103,7 +124,7 @@ class AlertDecisionTests(unittest.TestCase):
                 "Preț verificat: 101.02",
                 "SL: 99.80",
                 "TP: 110.00",
-                "R:R: 7.36",
+                "R:R: 7.50",
                 f"Valabil până la: {monitor.local_hm(result['signal']['expires_at_ms'])}",
                 "Status: PENDING",
             ]),
@@ -135,6 +156,91 @@ class AlertDecisionTests(unittest.TestCase):
         self.assertEqual("NO_ENTRY", result["status"])
         self.assertEqual([], sent)
 
+    def test_strategy_rr_2_59_does_not_send_at_three_minimum(self) -> None:
+        market = synthetic_market()
+        risk = 101.0 - (99.9 * (1 - RULES["invalidation_buffer_percent"] / 100))
+        target = 101.0 + risk * 2.59
+        sent: list[str] = []
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(monitor, "opposing_target", return_value=target):
+            result = self.scan(
+                market, directory, sent.append,
+                rules=dict(RULES, minimum_rr_for_enter=3.0),
+            )
+        self.assertEqual("NO_ENTRY", result["status"])
+        self.assertEqual([], sent)
+
+    def test_strategy_rr_exactly_three_sends_and_displays_three(self) -> None:
+        market = synthetic_market()
+        risk = 101.0 - (99.9 * (1 - RULES["invalidation_buffer_percent"] / 100))
+        target = 101.0 + risk * 3.0
+        sent: list[str] = []
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(monitor, "opposing_target", return_value=target):
+            result = self.scan(
+                market, directory, sent.append,
+                rules=dict(RULES, minimum_rr_for_enter=3.0),
+            )
+        self.assertEqual("SENT", result["status"])
+        self.assertEqual(1, len(sent))
+        self.assertIn("R:R: 3.00", sent[0])
+
+    def test_bnb_same_direction_and_pivot_alerts_only_once(self) -> None:
+        market = synthetic_market()
+        base = monitor.detect_entry(market["context"], market["structure"], market["trigger"], RULES, CONFIG)
+        assert base is not None
+        first = replace(base, symbol="BNB-USDT-SWAP", reference_level=786.50)
+        second = replace(
+            first,
+            sweep_start_ms=first.sweep_start_ms + QUARTER,
+            reentry_start_ms=first.reentry_start_ms + QUARTER,
+            confirmation_start_ms=first.confirmation_start_ms + QUARTER,
+            confirmation_end_ms=first.confirmation_end_ms + QUARTER,
+        )
+        sent: list[str] = []
+        with tempfile.TemporaryDirectory() as directory:
+            first_result = self.scan_fixed_signal(first, directory, sent.append)
+            second_result = self.scan_fixed_signal(second, directory, sent.append)
+        self.assertEqual(first.signature, second.signature)
+        self.assertEqual(["SENT", "DUPLICATE"], [first_result["status"], second_result["status"]])
+        self.assertEqual(1, len(sent))
+
+    def test_open_and_resolved_outcome_state_block_same_structural_pivot(self) -> None:
+        market = synthetic_market()
+        item = monitor.detect_entry(market["context"], market["structure"], market["trigger"], RULES, CONFIG)
+        assert item is not None
+        for state in ("open", "resolved"):
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as directory:
+                store = tracking.OutcomeStore(Path(directory) / "alert-outcomes.json")
+                store.add(tracking.new_alert(
+                    alert_id=item.signature,
+                    symbol=item.symbol,
+                    direction=item.direction,
+                    theoretical_entry=item.entry,
+                    verified_entry=item.entry,
+                    stop=item.stop,
+                    target=item.target,
+                    strategy_rr=item.rr,
+                    opened_at_ms=END_MS,
+                    valid_until_ms=item.expires_at_ms,
+                    timeout_hours=72,
+                    telegram_message_id=7,
+                ))
+                if state == "resolved":
+                    store.resolve(
+                        item.signature,
+                        tracking.Outcome("TP_HIT", item.rr, item.target, END_MS, END_MS),
+                        8,
+                    )
+                result = self.scan_fixed_signal(
+                    replace(item, sweep_start_ms=item.sweep_start_ms + QUARTER),
+                    directory,
+                    lambda _message: self.fail("duplicate must not send"),
+                    outcome_store=store,
+                )
+                self.assertFalse((Path(directory) / "dedup.json").exists())
+                self.assertEqual("DUPLICATE", result["status"])
+
     def test_expired_or_drifted_entry_is_skipped_silently_without_error(self) -> None:
         for reason in ("Semnal expirat inainte de trimitere", "Pretul s-a deplasat prea mult: drift=0.300%"):
             sent: list[str] = []
@@ -153,6 +259,10 @@ class AlertDecisionTests(unittest.TestCase):
             with self.assertRaises(monitor.TelegramError):
                 self.scan(synthetic_market(), directory, failing_sender)
             self.assertFalse((Path(directory) / "dedup.json").exists())
+            sent: list[str] = []
+            retry = self.scan(synthetic_market(), directory, sent.append)
+        self.assertEqual("SENT", retry["status"])
+        self.assertEqual(1, len(sent))
 
     def test_uncalibrated_label_stays_in_diagnostic_not_telegram(self) -> None:
         market = synthetic_market()
