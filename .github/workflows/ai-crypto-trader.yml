@@ -1,7 +1,7 @@
 name: AI Crypto Trader Entry Monitor
 
 # Live alerts only on main ticks started by `schedule` or by the chain itself (github-actions[bot]); only that
-# "Live scan" step reads TELEGRAM_TOKEN/TELEGRAM_CHAT_ID and it sends only on a confirmed NOW=ENTER setup.
+# "Live scan" reads TELEGRAM_TOKEN/TELEGRAM_CHAT_ID and sends only confirmed entries or tracked results.
 # Manual workflow_dispatch runs, re-runs and other branches take the "Dry-run scan" step and never see secrets.
 # Cadence: each tick is delayed by an Environment wait timer on its `wait` job (no runner is held while waiting),
 # scans inside 08:00-22:00 Europe/Brussels and dispatches the next tick with the ephemeral GITHUB_TOKEN.
@@ -52,6 +52,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
+      actions: read
       contents: read
     outputs:
       chain: ${{ steps.cadence.outputs.chain }}
@@ -125,7 +126,27 @@ jobs:
           restore-keys: |
             ai-crypto-dedup-${{ github.ref_name }}-
 
-      - name: Live scan (OKX public candles, Telegram only on NOW=ENTER, writes Step Summary)
+      - name: Restore persistent outcome state
+        id: outcome-restore
+        if: ${{ steps.cadence.outputs.active == 'true' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.triggering_actor == 'github-actions[bot]') }}
+        uses: actions/cache/restore@v4
+        with:
+          path: ai_crypto_monitor/state/alert-outcomes.json
+          key: ai-crypto-outcomes-v1-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ai-crypto-outcomes-v1-${{ github.ref_name }}-
+
+      - name: Recover outcome state from artifact backup
+        if: ${{ steps.cadence.outputs.active == 'true' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.triggering_actor == 'github-actions[bot]') && steps.outcome-restore.outputs.cache-matched-key == '' }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          python -m ai_crypto_monitor.outcome_tracking restore-artifact
+          --state "$GITHUB_WORKSPACE/ai_crypto_monitor/state/alert-outcomes.json"
+          --repository "$GITHUB_REPOSITORY"
+          --branch "$GITHUB_REF_NAME"
+
+      - name: Live scan (OKX public candles, Telegram only on confirmed entry or result, writes Step Summary)
         id: live
         if: ${{ steps.cadence.outputs.active == 'true' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.triggering_actor == 'github-actions[bot]') }}
         env:
@@ -143,6 +164,22 @@ jobs:
         with:
           path: ai_crypto_monitor/state/dedup.json
           key: ai-crypto-dedup-${{ github.ref_name }}-${{ github.run_id }}
+
+      - name: Save persistent outcome state
+        if: ${{ always() && steps.cadence.outputs.active == 'true' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.triggering_actor == 'github-actions[bot]') && hashFiles('ai_crypto_monitor/state/alert-outcomes.json') != '' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ai_crypto_monitor/state/alert-outcomes.json
+          key: ai-crypto-outcomes-v1-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Upload outcome state backup
+        if: ${{ always() && steps.cadence.outputs.active == 'true' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.triggering_actor == 'github-actions[bot]') && hashFiles('ai_crypto_monitor/state/alert-outcomes.json') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: open-alert-state
+          path: ai_crypto_monitor/state/alert-outcomes.json
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Ensure every active run has a diagnostic row
         if: ${{ always() && steps.cadence.outputs.active == 'true' }}

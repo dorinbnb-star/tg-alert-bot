@@ -92,6 +92,7 @@ class EntryMonitorTests(unittest.TestCase):
         ]
         self.assertEqual(expected, config["symbols"])
         self.assertEqual(len(expected), len(set(config["symbols"])))
+        self.assertEqual(72, config["outcome_timeout_hours"])
 
     def test_no_trigger_produces_no_entry(self) -> None:
         hour = 60 * 60_000

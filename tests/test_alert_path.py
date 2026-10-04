@@ -73,12 +73,19 @@ def copy_config(target: Path) -> None:
 class AlertDecisionTests(unittest.TestCase):
     def scan(self, market: dict, directory: str, sender, *, check=(END_MS + 60_000, 101.02), rules=RULES) -> dict:
         dedup = monitor.DedupStore(Path(directory) / "dedup.json", ttl_hours=168)
+        formatter = monitor.PriceFormatter({"BTC-USDT-SWAP": "0.01"})
         with patch.object(monitor, "fetch_closed_market", return_value=(END_MS + 60_000, market)):
             if isinstance(check, Exception):
                 with patch.object(monitor, "final_entry_check", side_effect=check):
-                    return monitor.scan_symbol(Path(directory), object(), False, CONFIG, rules, dedup, sender)
+                    return monitor.scan_symbol(
+                        Path(directory), object(), False, CONFIG, rules, dedup, sender,
+                        formatter=formatter,
+                    )
             with patch.object(monitor, "final_entry_check", return_value=check):
-                return monitor.scan_symbol(Path(directory), object(), False, CONFIG, rules, dedup, sender)
+                return monitor.scan_symbol(
+                    Path(directory), object(), False, CONFIG, rules, dedup, sender,
+                    formatter=formatter,
+                )
 
     def test_confirmed_entry_sends_one_complete_alert(self) -> None:
         sent: list[str] = []
@@ -88,14 +95,21 @@ class AlertDecisionTests(unittest.TestCase):
         self.assertEqual("SENT", result["status"])
         self.assertEqual(1, len(sent))
         message = sent[0]
-        for fragment in (
-            "NOW=ENTER LONG BTC-USDT-SWAP", "BIAS: LONG", "SETUP: sweep low 1H 100.00",
-            "TRIGGER: lumanarea 15m", "peste maximul lumanarii de reintrare 100.40",
-            "Entry: 101.00", "SL / invalidare: 99.80", "TP: 110.00", "R:R: 7.50",
-            "Pro: 4H close", "Contra: ", "Probabilitate: necalibrata", "fara ordine automate",
-        ):
-            self.assertIn(fragment, message)
-        for forbidden in ("WATCH", "NO_ENTRY", TOKEN, "probabilitate calibrata"):
+        self.assertEqual(
+            "\n".join([
+                "🟢 BTC LONG",
+                "",
+                "Entry teoretic: 101.00",
+                "Preț verificat: 101.02",
+                "SL: 99.80",
+                "TP: 110.00",
+                "R:R: 7.36",
+                f"Valabil până la: {monitor.local_hm(result['signal']['expires_at_ms'])}",
+                "Status: PENDING",
+            ]),
+            message,
+        )
+        for forbidden in ("WATCH", "NO_ENTRY", TOKEN, "BIAS", "SETUP", "TRIGGER", "Pro:", "Contra:"):
             self.assertNotIn(forbidden, message)
 
     def test_same_confirmed_candle_never_alerts_twice_across_runs(self) -> None:
@@ -140,12 +154,14 @@ class AlertDecisionTests(unittest.TestCase):
                 self.scan(synthetic_market(), directory, failing_sender)
             self.assertFalse((Path(directory) / "dedup.json").exists())
 
-    def test_uncalibrated_label_is_never_shown_as_a_probability_value(self) -> None:
+    def test_uncalibrated_label_stays_in_diagnostic_not_telegram(self) -> None:
         market = synthetic_market()
         signal = monitor.detect_entry(market["context"], market["structure"], market["trigger"], RULES, CONFIG)
         assert signal is not None
-        self.assertIn("Probabilitate: necalibrata.", monitor.format_entry_alert(signal, 101.0))
-        self.assertNotIn("%", monitor.format_entry_alert(signal, 101.0).split("Probabilitate:")[1])
+        message = monitor.format_entry_alert(signal, 101.0)
+        diagnostic = monitor.entry_diagnostic(signal, 101.0, monitor.tracked_rr(signal, 101.0))
+        self.assertNotIn("Probabilitate", message)
+        self.assertEqual("NECALIBRATA", diagnostic["probability"])
 
 
 class SendModeTests(unittest.TestCase):
@@ -198,7 +214,7 @@ class SendModeTests(unittest.TestCase):
         identity.assert_called_once()
         self.assertEqual(["sendMessage"], [method for method, _ in calls])
         self.assertEqual("42", calls[0][1]["chat_id"])
-        self.assertTrue(calls[0][1]["text"].startswith("NOW=ENTER LONG BTC-USDT-SWAP"))
+        self.assertTrue(calls[0][1]["text"].startswith("🟢 BTC LONG"))
         self.assertIn("alert_sent=true", self.output.read_text())
         self.assertTrue((self.root / "ai_crypto_monitor" / "state" / "dedup.json").exists())
 

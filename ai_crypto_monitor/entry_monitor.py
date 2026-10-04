@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import logging
+import math
 import os
 import sys
 import time
@@ -14,14 +15,16 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass
+from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 from zoneinfo import ZoneInfo
 
 try:
-    from ai_crypto_monitor import scan_diagnostics
+    from ai_crypto_monitor import outcome_tracking, scan_diagnostics
 except ModuleNotFoundError:  # Direct script execution used by the workflow.
+    import outcome_tracking
     import scan_diagnostics
 
 
@@ -29,6 +32,7 @@ LOGGER = logging.getLogger("entry-monitor")
 BRUSSELS = ZoneInfo("Europe/Brussels")
 OKX_BASE_URL = "https://www.okx.com"
 OKX_BARS = {"15": "15m", "60": "1H", "240": "4H"}
+OKX_TRACKING_BARS = {"1s": 1_000, "1m": 60_000, "15m": 15 * 60_000}
 OKX_HEADERS = {"Accept": "application/json", "User-Agent": "ai-crypto-trader-diagnostic/1.0"}
 TELEGRAM_BASE = "https://api.telegram.org"
 TECHNICAL_TEST_MESSAGE = (
@@ -279,6 +283,58 @@ class OkxClient:
         )
         return parse_okx_candles(okx_data(payload, f"candles {interval}"), interval)
 
+    def history_klines(self, symbol: str, bar: str, start_ms: int, end_ms: int) -> list[Candle]:
+        if bar not in OKX_TRACKING_BARS:
+            raise MonitorError(f"Interval de urmarire neacceptat: {bar}")
+        duration = OKX_TRACKING_BARS[bar]
+        if end_ms <= start_ms:
+            return []
+        found: dict[int, Candle] = {}
+        page_end = end_ms
+        while page_end > start_ms:
+            payload = self._get(
+                "/api/v5/market/history-candles",
+                {
+                    "instId": symbol,
+                    "bar": bar,
+                    "before": str(start_ms - 1),
+                    "after": str(page_end + 1),
+                    "limit": "300",
+                },
+            )
+            candles = parse_okx_candles(okx_data(payload, f"history-candles {bar}"), bar)
+            in_range = [
+                candle for candle in candles
+                if candle.start_ms >= start_ms and candle.start_ms + duration <= end_ms
+            ]
+            for candle in in_range:
+                found[candle.start_ms] = candle
+            if not candles:
+                break
+            oldest = candles[0].start_ms
+            if oldest <= start_ms or oldest >= page_end:
+                break
+            page_end = oldest
+            if len(candles) < 300:
+                break
+        return [found[key] for key in sorted(found)]
+
+    def tick_sizes(self) -> dict[str, str]:
+        payload = self._get("/api/v5/public/instruments", {"instType": "SWAP"})
+        values: dict[str, str] = {}
+        for item in okx_data(payload, "instruments"):
+            symbol = str(item.get("instId", "")).strip()
+            tick_size = str(item.get("tickSz", "")).strip()
+            if not symbol or not tick_size:
+                continue
+            try:
+                if Decimal(tick_size) <= 0:
+                    continue
+            except InvalidOperation:
+                continue
+            values[symbol] = tick_size
+        return values
+
     def last_price(self, symbol: str) -> float:
         payload = self._get("/api/v5/market/ticker", {"instId": symbol})
         data = okx_data(payload, "ticker")
@@ -286,6 +342,46 @@ class OkxClient:
             return float(data[0]["last"])
         except (IndexError, KeyError, TypeError, ValueError):
             raise MonitorError("OKX ticker incomplet") from None
+
+
+def fallback_price(value: float) -> str:
+    if value == 0:
+        return "0.00000"
+    decimals = max(0, 5 - math.floor(math.log10(abs(value))))
+    return f"{value:.{min(decimals, 14)}f}"
+
+
+def price_with_tick(value: float, tick_size: str | None) -> str:
+    if not tick_size:
+        return fallback_price(value)
+    try:
+        decimals = max(0, -Decimal(tick_size).normalize().as_tuple().exponent)
+    except InvalidOperation:
+        return fallback_price(value)
+    return f"{value:.{decimals}f}"
+
+
+@dataclass(frozen=True)
+class PriceFormatter:
+    tick_sizes: dict[str, str]
+
+    @classmethod
+    def load(cls, client: object) -> "PriceFormatter":
+        try:
+            loader = getattr(client, "tick_sizes")
+            values = loader()
+            if not isinstance(values, dict):
+                raise TypeError("tick_sizes invalid")
+            return cls({str(key): str(value) for key, value in values.items()})
+        except Exception as exc:  # Precision lookup must never stop a scan.
+            LOGGER.warning("tick_size_fallback=%s", type(exc).__name__)
+            return cls({})
+
+    def tick_size(self, symbol: str) -> str | None:
+        return self.tick_sizes.get(symbol)
+
+    def format(self, symbol: str, value: float) -> str:
+        return price_with_tick(value, self.tick_size(symbol))
 
 
 def telegram_call(token: str, method: str, params: dict | None = None) -> dict:
@@ -676,23 +772,42 @@ def final_entry_check(client: OkxClient, signal: EntrySignal, config: dict) -> t
     return now_ms, price
 
 
-def price(value: float) -> str:
-    return f"{value:,.2f}"
+def price(value: float, tick_size: str | None = None) -> str:
+    return price_with_tick(value, tick_size)
 
 
 def local_hm(milliseconds: int) -> str:
     return datetime.fromtimestamp(milliseconds / 1000, tz=BRUSSELS).strftime("%H:%M")
 
 
-def format_entry_alert(signal: EntrySignal, live_price: float) -> str:
+def short_symbol(symbol: str) -> str:
+    suffix = "-USDT-SWAP"
+    return symbol[:-len(suffix)] if symbol.endswith(suffix) else symbol
+
+
+def tracked_rr(signal: EntrySignal, live_price: float) -> float:
+    try:
+        return outcome_tracking.tracking_rr(signal.direction, live_price, signal.stop, signal.target)
+    except ValueError as exc:
+        raise EntrySkipped(str(exc)) from None
+
+
+def entry_diagnostic(
+    signal: EntrySignal,
+    live_price: float,
+    rr: float,
+    formatter: PriceFormatter | None = None,
+) -> dict:
+    formatter = formatter or PriceFormatter({})
+    display = lambda value: formatter.format(signal.symbol, value)
     long = signal.direction == "LONG"
     above = ">" if long else "<"
     drift = abs(live_price - signal.entry) / signal.entry * 100
     pro = [
-        f"4H close {price(signal.context_close)} {above} EMA50 {price(signal.context_ema50)} {above} EMA200 {price(signal.context_ema200)}",
-        f"1H close {price(signal.structure_close)} {above} EMA50 {price(signal.structure_ema50)}",
+        f"4H close {display(signal.context_close)} {above} EMA50 {display(signal.context_ema50)} {above} EMA200 {display(signal.context_ema200)}",
+        f"1H close {display(signal.structure_close)} {above} EMA50 {display(signal.structure_ema50)}",
         f"sweep {signal.sweep_depth_percent:.2f}% {'sub' if long else 'peste'} pivotul 1H, apoi reintrare",
-        f"R:R {signal.rr:.2f} >= minim {signal.min_rr:.2f}",
+        f"strategy R:R {signal.rr:.2f} >= minim {signal.min_rr:.2f}",
     ]
     contra = [
         "fara OI/CVD/heatmap; doar OHLC",
@@ -702,26 +817,183 @@ def format_entry_alert(signal: EntrySignal, live_price: float) -> str:
         contra.append("R:R aproape de minim")
     if drift >= 0.05:
         contra.append(f"pretul s-a miscat {drift:.2f}% de la confirmare")
-    probability = signal.probability.strip().upper()
-    probability_line = "Probabilitate: necalibrata" if probability in {"", "NECALIBRATA", "UNCALIBRATED"} else f"Probabilitate: {signal.probability}"
-    return "\n".join([
-        f"NOW=ENTER {signal.direction} {signal.symbol}",
-        f"BIAS: {signal.direction} (trend 4H si 1H {'peste' if long else 'sub'} EMA50)",
-        f"SETUP: sweep {'low' if long else 'high'} 1H {price(signal.reference_level)} + reintrare + confirmare 15m",
-        (
-            f"TRIGGER: lumanarea 15m {local_hm(signal.confirmation_start_ms)}-{local_hm(signal.confirmation_end_ms)} "
-            f"(Bruxelles) a inchis la {price(signal.entry)}, {'peste maximul' if long else 'sub minimul'} "
-            f"lumanarii de reintrare {price(signal.reentry_level)}"
+    return {
+        "strategy_rr": signal.rr,
+        "tracking_rr": rr,
+        "verified_entry": live_price,
+        "bias_summary": f"{signal.direction}: trend 4H si 1H {'peste' if long else 'sub'} EMA50",
+        "setup_summary": (
+            f"sweep {'low' if long else 'high'} 1H {display(signal.reference_level)} + reintrare + confirmare 15m"
         ),
-        f"Entry: {price(signal.entry)} (pret verificat {price(live_price)})",
-        f"SL / invalidare: {price(signal.stop)} ({'sub' if long else 'peste'} extremul sweep {price(signal.sweep_extreme)})",
-        f"TP: {price(signal.target)}",
-        f"R:R: {signal.rr:.2f}",
-        "Pro: " + "; ".join(pro),
-        "Contra: " + "; ".join(contra),
-        f"Valabil pana la {local_hm(signal.expires_at_ms)} (Bruxelles). {probability_line}.",
-        "Date: OKX, lumanari inchise 4H/1H/15m. Doar alerta, fara ordine automate.",
+        "trigger_summary": (
+            f"15m {local_hm(signal.confirmation_start_ms)}-{local_hm(signal.confirmation_end_ms)} Bruxelles, "
+            f"close {display(signal.entry)}, {'peste high' if long else 'sub low'} reintrare {display(signal.reentry_level)}"
+        ),
+        "pros": pro,
+        "cons": contra,
+        "probability": "NECALIBRATA",
+    }
+
+
+def format_entry_alert(
+    signal: EntrySignal,
+    live_price: float,
+    formatter: PriceFormatter | None = None,
+) -> str:
+    formatter = formatter or PriceFormatter({})
+    rr = tracked_rr(signal, live_price)
+    display = lambda value: formatter.format(signal.symbol, value)
+    marker = "🟢" if signal.direction == "LONG" else "🔴"
+    return "\n".join([
+        f"{marker} {short_symbol(signal.symbol)} {signal.direction}",
+        "",
+        f"Entry teoretic: {display(signal.entry)}",
+        f"Preț verificat: {display(live_price)}",
+        f"SL: {display(signal.stop)}",
+        f"TP: {display(signal.target)}",
+        f"R:R: {rr:.2f}",
+        f"Valabil până la: {local_hm(signal.expires_at_ms)}",
+        "Status: PENDING",
     ])
+
+
+def signed_r(value: float) -> str:
+    if value < 0:
+        return f"−{abs(value):.2f}R"
+    return f"+{value:.2f}R"
+
+
+def format_outcome_alert(
+    alert: outcome_tracking.TrackedAlert,
+    outcome: outcome_tracking.Outcome,
+    formatter: PriceFormatter,
+) -> str:
+    header = f"{short_symbol(alert.symbol)} {alert.direction}"
+    if outcome.status == "TP_HIT":
+        return f"✅ {header}: TP HIT ({signed_r(outcome.result_r)})"
+    if outcome.status == "SL_HIT":
+        return f"❌ {header}: SL HIT (−1R)"
+    current = formatter.format(alert.symbol, outcome.price)
+    return f"⏱ {header}: ÎNCHIS LA TIMEOUT ({signed_r(outcome.result_r)} la prețul curent {current})"
+
+
+def _outcome_diagnostic(alert: outcome_tracking.TrackedAlert, outcome: outcome_tracking.Outcome) -> dict:
+    run_id = os.getenv("GITHUB_RUN_ID", "local")
+    attempt = os.getenv("GITHUB_RUN_ATTEMPT", "1")
+    return {
+        "record_id": f"{run_id}:{attempt}:{alert.symbol}:outcome:{alert.alert_id}",
+        "event_type": "ALERT_RESULT",
+        "alert_id": alert.alert_id,
+        "direction": alert.direction,
+        "theoretical_entry": alert.theoretical_entry,
+        "verified_entry": alert.verified_entry,
+        "stop": alert.stop,
+        "target": alert.target,
+        "strategy_rr": alert.strategy_rr,
+        "tracking_rr": alert.tracking_rr,
+        "result_r": outcome.result_r,
+        "result_price": outcome.price,
+        "occurred_at_ms": outcome.occurred_at_ms,
+        "candle_start_ms": outcome.candle_start_ms,
+        "same_candle_collision": outcome.same_candle_collision,
+        "stopped_at": outcome.status,
+    }
+
+
+def _complete_tracking_candles(
+    client: OkxClient,
+    alert: outcome_tracking.TrackedAlert,
+    bar: str,
+    duration_ms: int,
+    start_ms: int,
+    end_ms: int,
+) -> list[Candle]:
+    candles = client.history_klines(alert.symbol, bar, start_ms, end_ms)
+    expected = list(range(start_ms, end_ms, duration_ms))
+    actual = [candle.start_ms for candle in candles]
+    if actual != expected:
+        raise MonitorError(
+            f"Date incomplete tracking {alert.symbol} {bar}: {len(actual)} < {len(expected)}"
+        )
+    return candles
+
+
+def track_open_alerts(
+    client: OkxClient,
+    store: outcome_tracking.OutcomeStore,
+    formatter: PriceFormatter,
+    grace_seconds: int,
+    sender: Callable[[str], dict | None],
+) -> list[dict]:
+    if not store.open:
+        return []
+    now_ms = client.server_time_ms()
+    closed_cutoff = now_ms - grace_seconds * 1000
+    results: list[dict] = []
+    for alert in list(store.open.values()):
+        try:
+            outcome = None
+            for bar, duration, window_start, window_end in outcome_tracking.tracking_windows(alert):
+                start = max(alert.cursor_ms, window_start)
+                available_end = min(window_end, outcome_tracking.floor_boundary(closed_cutoff, duration))
+                if available_end <= start:
+                    continue
+                candles = _complete_tracking_candles(
+                    client, alert, bar, duration, start, available_end,
+                )
+                outcome = outcome_tracking.evaluate_candles(alert, candles, duration)
+                if outcome is not None:
+                    break
+                store.advance(alert.alert_id, available_end)
+            timeout_boundary = outcome_tracking.floor_boundary(alert.timeout_at_ms, outcome_tracking.SECOND_MS)
+            if outcome is None and now_ms >= alert.timeout_at_ms and alert.cursor_ms >= timeout_boundary:
+                current_price = client.last_price(alert.symbol)
+                outcome = outcome_tracking.Outcome(
+                    status="TIMEOUT",
+                    result_r=outcome_tracking.timeout_r(alert, current_price),
+                    price=current_price,
+                    occurred_at_ms=now_ms,
+                    candle_start_ms=None,
+                )
+            if outcome is None:
+                results.append({"status": "PENDING", "alert_id": alert.alert_id, "symbol": alert.symbol})
+                continue
+            message = format_outcome_alert(alert, outcome, formatter)
+            response = sender(message) or {}
+            message_id = response.get("message_id") if isinstance(response, dict) else None
+            store.resolve(alert.alert_id, outcome, message_id)
+            diagnostic = _outcome_diagnostic(alert, outcome)
+            append_diagnostic(diagnostic, outcome.status, alert.symbol)
+            results.append({
+                "status": outcome.status,
+                "alert_id": alert.alert_id,
+                "symbol": alert.symbol,
+                "direction": alert.direction,
+                "result_r": outcome.result_r,
+                "price": outcome.price,
+                "tick_size": formatter.tick_size(alert.symbol),
+                "message": message,
+                "diagnostic": diagnostic,
+            })
+        except TelegramError:
+            raise
+        except (MonitorError, outcome_tracking.OutcomeStateError) as exc:
+            diagnostic = {
+                "record_id": (
+                    f"{os.getenv('GITHUB_RUN_ID', 'local')}:{os.getenv('GITHUB_RUN_ATTEMPT', '1')}:"
+                    f"{alert.symbol}:tracking-error:{alert.alert_id}"
+                ),
+                "event_type": "TRACKING_ERROR",
+                "alert_id": alert.alert_id,
+                "reason": str(exc),
+                "stopped_at": "TRACKING_ERROR",
+            }
+            append_diagnostic(diagnostic, "TRACKING_ERROR", alert.symbol)
+            results.append({
+                "status": "TRACKING_ERROR", "alert_id": alert.alert_id,
+                "symbol": alert.symbol, "reason": str(exc), "diagnostic": diagnostic,
+            })
+    return results
 
 
 def scan_symbol(
@@ -731,8 +1003,11 @@ def scan_symbol(
     config: dict,
     rules: dict,
     dedup: DedupStore,
-    sender: Callable[[str], None] | None = None,
+    sender: Callable[[str], dict | None] | None = None,
+    formatter: PriceFormatter | None = None,
+    outcome_store: outcome_tracking.OutcomeStore | None = None,
 ) -> dict:
+    formatter = formatter or PriceFormatter({})
     detected_at_ms, series = fetch_closed_market(client, config)
     signal = detect_entry(series["context"], series["structure"], series["trigger"], rules, config)
     trace: dict = {}
@@ -771,13 +1046,20 @@ def scan_symbol(
     except EntrySkipped as exc:
         trace["final_check_reason"] = str(exc)
         return finish({"status": "ENTRY_SKIPPED", "reason": str(exc), "signature": signal.signature[:12]})
-    if dedup.contains(signal.signature, checked_at_ms):
+    if dedup.contains(signal.signature, checked_at_ms) or (
+        outcome_store is not None and outcome_store.contains(signal.signature)
+    ):
         return finish({"status": "DUPLICATE", "signature": signal.signature[:12]})
-    message = format_entry_alert(signal, live_price)
+    rr = tracked_rr(signal, live_price)
+    trace.update(entry_diagnostic(signal, live_price, rr, formatter))
+    message = format_entry_alert(signal, live_price, formatter)
     result = {
         "status": "ENTRY_READY_DRY_RUN" if dry_run else "ENTRY_READY",
         "checked_at": utc_iso(checked_at_ms),
         "live_price": live_price,
+        "tracking_rr": rr,
+        "strategy_rr": signal.rr,
+        "tick_size": formatter.tick_size(signal.symbol),
         "signal": asdict(signal),
         "signature": signal.signature[:12],
         "message": message,
@@ -785,7 +1067,26 @@ def scan_symbol(
     if not dry_run:
         if sender is None:
             raise MonitorError("Sender lipsa")
-        sender(message)
+        response = sender(message) or {}
+        message_id = response.get("message_id") if isinstance(response, dict) else None
+        if outcome_store is not None:
+            try:
+                outcome_store.add(outcome_tracking.new_alert(
+                    alert_id=signal.signature,
+                    symbol=signal.symbol,
+                    direction=signal.direction,
+                    theoretical_entry=signal.entry,
+                    verified_entry=live_price,
+                    stop=signal.stop,
+                    target=signal.target,
+                    strategy_rr=signal.rr,
+                    opened_at_ms=checked_at_ms,
+                    valid_until_ms=signal.expires_at_ms,
+                    timeout_hours=int(config.get("outcome_timeout_hours", 72)),
+                    telegram_message_id=message_id,
+                ))
+            except outcome_tracking.OutcomeStateError as exc:
+                raise MonitorError(str(exc)) from None
         dedup.mark(signal.signature, checked_at_ms)
         result["status"] = "SENT"
     return finish(result)
@@ -795,7 +1096,7 @@ def scan_once(
     root: Path,
     client: OkxClient,
     dry_run: bool,
-    sender: Callable[[str], None] | None = None,
+    sender: Callable[[str], dict | None] | None = None,
 ) -> dict:
     config = read_json(package_dir(root) / "config-v0.1.json")
     rules = read_json(package_dir(root) / "rules-v0.1.json")
@@ -804,7 +1105,43 @@ def scan_once(
     symbols = config.get("symbols")
     if not isinstance(symbols, list) or not symbols:
         raise MonitorError("Lista symbols lipseste sau este goala")
+    formatter = PriceFormatter.load(client)
     dedup = DedupStore(state_dir(root) / "dedup.json", int(config["dedup_ttl_hours"]))
+    outcome_path = state_dir(root) / "alert-outcomes.json"
+    try:
+        outcome_store = outcome_tracking.OutcomeStore(outcome_path)
+    except (OSError, TypeError, ValueError, json.JSONDecodeError, outcome_tracking.OutcomeStateError) as exc:
+        raise MonitorError(f"Stare rezultate invalida: {type(exc).__name__}") from None
+    if not dry_run and not outcome_path.exists():
+        outcome_store.recovery_status = os.getenv("OUTCOME_STATE_RECOVERY", "LOCAL_BOOTSTRAP")
+        try:
+            outcome_store.save()
+        except outcome_tracking.OutcomeStateError as exc:
+            raise MonitorError(str(exc)) from None
+    recovery_status = outcome_store.recovery_status
+    if not dry_run and recovery_status == "EMPTY_BOOTSTRAP":
+        append_diagnostic({
+            "record_id": (
+                f"{os.getenv('GITHUB_RUN_ID', 'local')}:{os.getenv('GITHUB_RUN_ATTEMPT', '1')}:"
+                "TRACKING_STATE_LOST"
+            ),
+            "event_type": "TRACKING_STATE_LOST",
+            "reason": "cache si artifact absente; alertele vechi nu sunt reconstruite",
+            "stopped_at": "TRACKING_STATE_LOST",
+        }, "TRACKING_STATE_LOST", "ALL")
+        outcome_store.recovery_status = "ACTIVE_AFTER_EMPTY_BOOTSTRAP"
+        try:
+            outcome_store.save()
+        except outcome_tracking.OutcomeStateError as exc:
+            raise MonitorError(str(exc)) from None
+    outcome_results: list[dict] = []
+    if not dry_run and outcome_store.open:
+        if sender is None:
+            raise MonitorError("Sender lipsa pentru urmarirea rezultatelor")
+        outcome_results = track_open_alerts(
+            client, outcome_store, formatter,
+            int(config["closed_candle_grace_seconds"]), sender,
+        )
     results = []
     for raw_symbol in symbols:
         symbol = str(raw_symbol).upper().strip()
@@ -813,7 +1150,10 @@ def scan_once(
         symbol_config = dict(config)
         symbol_config["symbol"] = symbol
         try:
-            result = scan_symbol(root, client, dry_run, symbol_config, rules, dedup, sender)
+            result = scan_symbol(
+                root, client, dry_run, symbol_config, rules, dedup, sender,
+                formatter=formatter, outcome_store=outcome_store,
+            )
         except TelegramError as exc:
             symbol_scan_error(symbol, str(exc))
             setattr(exc, "symbol_diagnostic_recorded", True)
@@ -838,7 +1178,14 @@ def scan_once(
         status = "ENTRY_SKIPPED"
     else:
         status = "NO_ENTRY"
-    return {"status": status, "results": results, "alert_sent": "SENT" in statuses}
+    return {
+        "status": status,
+        "results": results,
+        "outcomes": outcome_results,
+        "alert_sent": "SENT" in statuses,
+        "result_sent": any(item.get("status") in {"TP_HIT", "SL_HIT", "TIMEOUT"} for item in outcome_results),
+        "outcome_recovery": recovery_status,
+    }
 
 
 def write_alert_sent_output() -> None:
@@ -860,6 +1207,7 @@ def write_github_outputs(result: dict) -> None:
     with Path(output_path).open("a", encoding="utf-8") as handle:
         handle.write(f"status={status}\n")
         handle.write(f"alert_sent={'true' if alert_sent else 'false'}\n")
+        handle.write(f"result_sent={'true' if result.get('result_sent') else 'false'}\n")
 
 
 def write_step_summary(result: dict | None = None, error: str | None = None) -> None:
@@ -880,9 +1228,13 @@ def write_step_summary(result: dict | None = None, error: str | None = None) -> 
                 continue
             signal = item.get("signal")
             if signal:
+                tick_size = item.get("tick_size")
                 lines.append(
-                    f"- {signal['symbol']} {signal['direction']}: entry {signal['entry']:,.2f}, "
-                    f"SL {signal['stop']:,.2f}, TP {signal['target']:,.2f}, R:R {signal['rr']:.2f}, "
+                    f"- {signal['symbol']} {signal['direction']}: entry teoretic "
+                    f"{price(signal['entry'], tick_size)}, pret verificat "
+                    f"{price(item['live_price'], tick_size)}, SL {price(signal['stop'], tick_size)}, "
+                    f"TP {price(signal['target'], tick_size)}, R:R urmarit {item['tracking_rr']:.2f}, "
+                    f"strategy_rr {item['strategy_rr']:.2f}, "
                     f"expira {utc_iso(signal['expires_at_ms'])}"
                 )
             elif item.get("detected_at"):
@@ -897,6 +1249,25 @@ def write_step_summary(result: dict | None = None, error: str | None = None) -> 
                     f"  - Diagnostic {diagnostic.get('symbol', 'UNKNOWN')}: "
                     f"oprit la `{stopped}` (ultima etapa trecuta: `{passed}`)"
                 )
+                for label, key in (("BIAS", "bias_summary"), ("SETUP", "setup_summary"), ("TRIGGER", "trigger_summary")):
+                    if diagnostic.get(key):
+                        lines.append(f"  - {label}: {diagnostic[key]}")
+                if diagnostic.get("pros"):
+                    lines.append("  - Pro: " + "; ".join(diagnostic["pros"]))
+                if diagnostic.get("cons"):
+                    lines.append("  - Contra: " + "; ".join(diagnostic["cons"]))
+        outcomes = result.get("outcomes", [])
+        if outcomes:
+            lines += ["", "### Rezultate teoretice"]
+            for item in outcomes:
+                if item.get("status") in {"TP_HIT", "SL_HIT", "TIMEOUT"}:
+                    lines.append(
+                        f"- {item['symbol']} {item['direction']}: **{item['status']}**, "
+                        f"{signed_r(float(item['result_r']))}, pret "
+                        f"{price(float(item['price']), item.get('tick_size'))}"
+                    )
+                elif item.get("status") == "TRACKING_ERROR":
+                    lines.append(f"- {item['symbol']}: **TRACKING_ERROR** - `{item['reason']}`")
         lines.append("")
     with Path(summary_path).open("a", encoding="utf-8") as handle:
         handle.write("\n".join(lines) + "\n")
@@ -946,10 +1317,10 @@ def main(argv: list[str] | None = None) -> int:
             token, chat_id = credentials(env_file)
             config = read_json(package_dir(root) / "config-v0.1.json")
 
-            def sender(message: str) -> None:
+            def sender(message: str) -> dict:
                 # Identity is checked only when a confirmed alert is about to be sent, so quiet ticks make no Telegram calls.
                 require_delivery_identity(root, token, chat_id, config)
-                telegram_call(token, "sendMessage", {"chat_id": chat_id, "text": message})
+                return telegram_call(token, "sendMessage", {"chat_id": chat_id, "text": message})
         client = OkxClient()
         if args.command == "scan":
             result = scan_once(root, client, dry_run, sender)
@@ -967,7 +1338,7 @@ def main(argv: list[str] | None = None) -> int:
             except MonitorError as exc:
                 LOGGER.error("scan_error=%s", exc)
             time.sleep(interval)
-    except (MonitorError, TelegramError) as exc:
+    except (MonitorError, TelegramError, outcome_tracking.OutcomeStateError) as exc:
         if args.command == "scan":
             write_step_summary(error=str(exc))
             if not getattr(exc, "symbol_diagnostic_recorded", False):
