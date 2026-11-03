@@ -26,7 +26,10 @@ class IsolationTests(unittest.TestCase):
         text = WORKFLOW.read_text(encoding="utf-8")
         head = text.split("permissions:")[0]
         self.assertIn("on:\n  push:\n    branches:\n      - codex/github-actions-monitor\n", head)
-        self.assertIn('      - "backtest/**"\n      - ".github/workflows/backtest.yml"\n', head)
+        self.assertIn('      - "backtest/replay.py"\n', head)
+        self.assertIn('      - ".github/workflows/backtest.yml"\n', head)
+        self.assertNotIn('      - "backtest/**"\n', head)
+        self.assertNotIn('      - "backtest/v3_', head)
         for other in ("schedule", "workflow_dispatch", "pull_request", "main\n"):
             self.assertNotIn(other, head)
         self.assertIn("    if: github.ref != 'refs/heads/main'\n", text)

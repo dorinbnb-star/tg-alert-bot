@@ -1,0 +1,83 @@
+name: Backtest v3 channel
+
+# Isolated from v1 and from the live monitor: public OKX data only, no secrets,
+# no Telegram, no orders and no dependency on the unresolved v1 golden test.
+on:
+  push:
+    branches:
+      - codex/github-actions-monitor
+    paths:
+      - "backtest/v3_*.py"
+      - "backtest/v3_config.json"
+      - "backtest/SPEC-v3-canal.md"
+      - "backtest/costs.json"
+      - "backtest/tests/test_v3_*.py"
+      - ".github/workflows/backtest-v3.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backtest-v3-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  backtest-v3:
+    if: github.ref != 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: V3 unit tests
+        run: >-
+          python -m unittest
+          backtest.tests.test_v3_strategy
+          backtest.tests.test_v3_engine
+          backtest.tests.test_v3_report
+          backtest.tests.test_v3_pipeline
+          backtest.tests.test_v3_isolation
+          -v
+
+      - name: Restore OKX v3 history
+        id: data
+        uses: actions/cache/restore@v4
+        with:
+          path: backtest_data/v3
+          key: backtest-okx-v3-2026-11-01-${{ hashFiles('backtest/v3_data.py', 'backtest/v3_config.json') }}
+
+      - name: Download and validate public OKX v3 history
+        timeout-minutes: 120
+        run: python -m backtest.v3_data
+
+      - name: Save OKX v3 history
+        if: steps.data.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: backtest_data/v3
+          key: ${{ steps.data.outputs.cache-primary-key }}
+
+      - name: Run v3 variants, validation, sensitivity and random baseline
+        timeout-minutes: 110
+        run: python -m backtest.v3_run
+
+      - name: Upload v3 report and diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backtest-v3-results
+          path: |
+            backtest_results/v3/
+            backtest_data/v3/manifest-v3.json
+          if-no-files-found: warn
+          retention-days: 30

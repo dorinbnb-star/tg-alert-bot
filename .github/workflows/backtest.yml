@@ -7,7 +7,21 @@ on:
     branches:
       - codex/github-actions-monitor
     paths:
-      - "backtest/**"
+      - "backtest/__init__.py"
+      - "backtest/costs.json"
+      - "backtest/download.py"
+      - "backtest/replay.py"
+      - "backtest/report.py"
+      - "backtest/simulate.py"
+      - "backtest/variants.py"
+      - "backtest/tests/__init__.py"
+      - "backtest/tests/golden_run369.json"
+      - "backtest/tests/synthetic.py"
+      - "backtest/tests/test_golden.py"
+      - "backtest/tests/test_isolation.py"
+      - "backtest/tests/test_no_lookahead.py"
+      - "backtest/tests/test_replay.py"
+      - "backtest/tests/test_simulate.py"
       - ".github/workflows/backtest.yml"
 
 permissions:
