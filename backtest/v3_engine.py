@@ -301,6 +301,8 @@ class PortfolioEngine:
                 open_quantities["RUNNER"] = max(
                     0.0, position.remaining - open_quantities["TP1"] - open_quantities["TP2"],
                 )
+                if position.variant.exit_family == "REFERENCE":
+                    open_quantities = {"TP1": 0.0, "TP2": 0.0, "RUNNER": position.remaining}
                 for label, quantity in open_quantities.items():
                     position.tranche_pnl[label] += pnl * quantity / position.remaining
                 self.equity += pnl
@@ -576,7 +578,8 @@ class PortfolioEngine:
         active.entry_plan = strategy.planned_entry(active.setup, self.params)
         stop, _, too_wide = strategy.initial_stop(active.setup, active.entry_plan, atr1, self.params)
         active.stop = stop
-        if too_wide:
+        is_limit = self.variant.entry_mode == "ENTRY_LIMIT"
+        if is_limit and too_wide:
             self._cancel(symbol, "SL_TOO_WIDE", active.confirmation_ms)
             return
         if self.variant.exit_family == "SPLIT":
@@ -594,7 +597,7 @@ class PortfolioEngine:
                 self._cancel(symbol, "TARGET_BEFORE_ENTRY", active.confirmation_ms)
                 return
             risk = abs(active.entry_plan - stop)
-            if abs(tp1 - active.entry_plan) < self.params.minimum_tp1_r * risk:
+            if is_limit and abs(tp1 - active.entry_plan) < self.params.minimum_tp1_r * risk:
                 shadow = self._shadow_reference(symbol, active)
                 self._record_setup(symbol, active, "TP1_TOO_CLOSE", active.confirmation_ms,
                                    **shadow)
@@ -603,7 +606,7 @@ class PortfolioEngine:
             rr_target = tp2
         else:
             rr_target = active.setup.reference_tp
-        if strategy.gross_rr(active.entry_plan, stop, rr_target) < self.variant.minimum_rr:
+        if is_limit and strategy.gross_rr(active.entry_plan, stop, rr_target) < self.variant.minimum_rr:
             self._cancel(symbol, "RR_REJECTED", active.confirmation_ms)
             return
         self.pending[symbol] = PendingEntry(

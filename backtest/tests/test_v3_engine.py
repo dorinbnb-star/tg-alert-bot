@@ -50,6 +50,18 @@ def injected_engine(candles: list[v3_strategy.Candle], variant: v3_engine.Varian
 
 
 class MarketEntryTests(unittest.TestCase):
+    def test_market_rr_is_not_rejected_using_the_limit_plan_at_confirmation(self) -> None:
+        candles = [
+            v3_strategy.Candle(0, 105, 106, 104.8, 105.8, 1),
+            v3_strategy.Candle(v3_strategy.HOUR_MS, 104.5, 106, 104.2, 105, 1),
+        ]
+        engine = injected_engine(candles, v3_engine.Variant("ENTRY_MARKET_NEXT_OPEN", "REFERENCE", 6))
+        engine.pending.clear()
+        engine.prepared["BTC-USDT-SWAP"].atr1 = [1, 1]
+        engine._confirm("BTC-USDT-SWAP", 0, candles[0])
+        self.assertIn("BTC-USDT-SWAP", engine.pending)
+        self.assertIsNotNone(engine._market_candidate("BTC-USDT-SWAP", candles[1]))
+
     def test_target_at_open_rejects_market_entry(self) -> None:
         candles = [v3_strategy.Candle(0, 116, 117, 115, 116, 1)]
         engine = injected_engine(candles, v3_engine.Variant("ENTRY_MARKET_NEXT_OPEN", "REFERENCE", 2))
@@ -191,6 +203,9 @@ class CostAndStateTests(unittest.TestCase):
         result = engine.run()
         self.assertTrue(result.trades)
         self.assertNotEqual(0, result.trades[0]["funding"])
+        self.assertEqual(0, result.trades[0]["tp1_pnl"])
+        self.assertEqual(0, result.trades[0]["tp2_pnl"])
+        self.assertAlmostEqual(result.trades[0]["net_pnl"], result.trades[0]["runner_pnl"])
 
     def test_funding_after_tp1_uses_only_the_remaining_quantity(self) -> None:
         candles = [v3_strategy.Candle(0, 106, 110.5, 105, 110, 1)]

@@ -89,11 +89,18 @@ def add_splits(rows: list[dict], bounds: dict, timestamp_key: str) -> None:
         row["split"] = split_name(int(row[timestamp_key]), bounds)
 
 
+def development_trades(trades: list[dict], bounds: dict) -> list[dict]:
+    # Selection must not consume an outcome observed after development ended.
+    return [row for row in trades
+            if bounds["start_ms"] <= int(row["entry_ms"]) < bounds["development_end_ms"]
+            and int(row["exit_ms"]) <= bounds["development_end_ms"]]
+
+
 def choose_variant(results: dict[str, v3_engine.RunResult], bounds: dict, tie_r: float) -> str:
     order = {key: index for index, key in enumerate(results)}
     scored = []
     for key, result in results.items():
-        rows = [row for row in result.trades if split_name(int(row["entry_ms"]), bounds) == "development"]
+        rows = development_trades(result.trades, bounds)
         item = v3_report.metrics(rows)
         if item["mean_r"] is not None:
             scored.append((key, item))
@@ -210,7 +217,7 @@ def sensitivity_runs(market: dict, base_config: dict, costs: dict, chosen: v3_en
             config = dict(base_config, **{parameter: value})
             prepared = v3_engine.prepare_market(market, config)
             result = v3_engine.run_variant(market, config, costs, chosen, prepared)
-            rows = [row for row in result.trades if split_name(int(row["entry_ms"]), bounds) == "development"]
+            rows = development_trades(result.trades, bounds)
             item = v3_report.metrics(rows)
             output.append({"parameter": parameter, "value": value, **item})
     return output
@@ -244,7 +251,7 @@ def random_baseline(market: dict, config: dict, costs: dict, chosen: v3_engine.V
     means = []
     for seed in range(seeds):
         result = v3_engine.run_variant(market, config, costs, chosen, prepared, random_seed=seed)
-        rows = [row for row in result.trades if split_name(int(row["entry_ms"]), bounds) == "development"]
+        rows = development_trades(result.trades, bounds)
         mean = v3_report.metrics(rows)["mean_r"]
         if mean is not None:
             means.append(mean)
@@ -305,8 +312,7 @@ def main(argv: list[str] | None = None) -> int:
     add_splits(all_setups, bounds, "breakout_ms")
     add_splits(all_trades, bounds, "entry_ms")
 
-    chosen_development = [row for row in filter_results[final_key].trades
-                          if split_name(int(row["entry_ms"]), bounds) == "development"]
+    chosen_development = development_trades(filter_results[final_key].trades, bounds)
     chosen_mean = v3_report.metrics(chosen_development)["mean_r"]
     seeds = int(config["random_baseline_seeds"]) if args.baseline_seeds is None else args.baseline_seeds
     baseline = random_baseline(market, config, costs, chosen_final, prepared, bounds, seeds, chosen_mean)

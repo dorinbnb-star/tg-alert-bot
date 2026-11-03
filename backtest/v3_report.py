@@ -102,11 +102,16 @@ def render(
         "Strategie: canal orizontal 4H → spargere → retest/confirmare 1H. "
         "Metrica principală este R mediu net după comisioane, slippage și funding real complet.",
         "",
+        "Notă de validare: rularea 41628474046 a expus deja perioada finală înainte "
+        "de corectarea filtrării market și a selecției cronologice. Rerularea verifică "
+        "aceste corecții, fără ajustarea pragurilor. Perioada finală nu mai poate fi "
+        "prezentată drept holdout observat pentru prima dată.",
+        "",
         "## Perioade",
         "",
         f"- dezvoltare: `{split_bounds['start']}` – `{split_bounds['development_end']}`",
         f"- walk-forward: `{split_bounds['development_end']}` – `{split_bounds['walk_forward_end']}`",
-        f"- final neatins: `{split_bounds['walk_forward_end']}` – `{split_bounds['end']}`",
+        f"- final (recalculat după corecții): `{split_bounds['walk_forward_end']}` – `{split_bounds['end']}`",
         "",
         "## Selecție pe dezvoltare",
         "",

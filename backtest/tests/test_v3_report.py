@@ -16,6 +16,12 @@ def trade(value: float, exit_ms: int, complete: bool = True) -> dict:
 
 
 class V3ReportTests(unittest.TestCase):
+    def test_development_selection_excludes_outcomes_after_the_boundary(self) -> None:
+        bounds = {"start_ms": 0, "development_end_ms": 100}
+        completed = dict(trade(1, 90), entry_ms=50)
+        crosses = dict(trade(1000, 110), entry_ms=80)
+        self.assertEqual([completed], v3_run.development_trades([completed, crosses], bounds))
+
     def test_plateau_requires_same_sign_and_both_neighbors_within_delta(self) -> None:
         rows = [
             {"parameter": "channel_window_4h", "value": 48, "mean_r": 0.20},
