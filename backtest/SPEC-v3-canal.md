@@ -115,9 +115,12 @@ pivotul înaintea acelui moment.
 de lungă pentru mai multe atingeri ale marginilor, dar rămâne apropiată de
 orizontul swing urmărit.
 
-Pentru fiecare lumânare 4H candidată la spargere `B[t]`, canalul se calculează
+Pentru fiecare lumânare 4H evaluată pentru starea ARMED `B[t]`, canalul se calculează
 exclusiv din lumânările `B[t-N] ... B[t-1]`. Lumânarea `B[t]` nu participă la
 canal, ATR(ref), regresie, pivoți sau margini.
+
+După trecerea în EXITED se păstrează canalul înghețat la ieșire, conform
+secțiunii 6; nu se mută fereastra până la spargere sau anularea ieșirii.
 
 Sunt eligibili numai pivoții al căror candle index este în fereastra de N
 lumânări și care au devenit disponibili cel târziu la închiderea `B[t-1]`.
@@ -189,7 +192,38 @@ Pe un simbol poate exista simultan cel mult un setup, un ordin sau o poziție v3
 
 ## 6. Spargerea și înghețarea setup-ului
 
-La închiderea `B[t]`:
+Se aplică următoarea succesiune de stări, separat pe fiecare simbol, numai la
+închideri 4H. Regula de unicitate și eligibilitate din secțiunea 5.4 rămâne
+neschimbată. Nu se caută o nouă ieșire cât timp există un setup, ordin sau poziție.
+
+### 6.1 ARMED: canal valid înaintea primei ieșiri
+
+La închiderea `B[t]`, canalul calculat din `B[t-N] ... B[t-1]` trebuie să fie
+valid conform secțiunii 5 și să îndeplinească `L <= close[t-1] <= U`.
+Egalitatea este în interior. Numai atunci simbolul poate fi ARMED pentru
+evaluarea lui `close[t]`. Cât timp nu s-a produs ieșirea, canalul se recalculează
+la fiecare lumânare, iar aceste condiții se verifică din nou.
+
+Un canal descoperit cu close-ul anterior deja în afara `[L, U]` nu devine ARMED
+și nu generează spargere, nici retroactiv. Dacă noul canal nu mai este valid
+sau condiția close-ului anterior nu mai este îndeplinită, nu se păstrează o
+armare care ar ocoli aceste verificări.
+
+### 6.2 EXITED: prima închidere în afara canalului
+
+Prima lumânare evaluată din ARMED cu `close > U` produce EXITED LONG;
+cu `close < L` produce EXITED SHORT. Close-ul egal cu o margine nu este ieșire.
+Lumânarea de ieșire poate fi chiar `B[t]` la care s-au îndeplinit condițiile
+ARMED; nu este obligatorie încă o lumânare de așteptare.
+
+La ieșire se îngheață `U`, `L`, `W`, identitatea canalului și `ATR(ref)`,
+folosind exclusiv date cunoscute la închiderea lumânării anterioare ieșirii.
+Se memorează direcția și timestampul ieșirii. Canalul nu se recalculează în EXITED.
+
+### 6.3 BREAKOUT: prag atins după ieșire
+
+În EXITED, inclusiv pe lumânarea care produce ieșirea, se verifică pragul pe
+aceeași parte, față de canalul și ATR(ref) înghețate:
 
 ```text
 LONG breakout:  close[t] >= U + 0,5 * ATR(ref)
@@ -198,17 +232,41 @@ SHORT breakout: close[t] <= L - 0,5 * ATR(ref)
 
 Pragul `0,5 * ATR(ref)` este **IPOTEZĂ**. Egalitatea trece condiția.
 
-La spargere se îngheață:
+La BREAKOUT se păstrează geometria înghețată la ieșire și se înregistrează:
 
 - direcția;
-- `U`, `L`, `W` și identitatea canalului;
-- `ATR(ref)`;
 - timestampul spargerii;
 - TP-ul de referință;
 - contextul Daily disponibil la acel moment;
 - volumul și SMA20 de volum 4H, numai pentru varianta de volum.
 
 Nu se cere ca open-ul lumânării de spargere să fie în canal.
+Secțiunile 7+ privind retestul, confirmarea, intrarea și managementul se aplică
+de la BREAKOUT, fără schimbarea regulilor lor. Termenele acestor secțiuni pornesc
+de la spargere, nu de la prima ieșire.
+
+### 6.4 Revenire, schimbare de parte și expirare
+
+Înainte de BREAKOUT, fiecare close din EXITED se tratează în această ordine:
+
+1. Dacă revine în `[L, U]`, inclusiv egalitatea, ieșirea se anulează ca revenire.
+   Se eliberează canalul înghețat și se revine la evaluarea ARMED, cu recalculare
+   normală. Următoarea lumânare trebuie să îndeplinească din nou secțiunea 6.1;
+   revenirea nu autorizează folosirea unui canal devenit invalid.
+2. Dacă închide pe partea opusă canalului înghețat, devine o ieșire nouă în
+   direcția opusă, cu aceleași `U`, `L`, `W`, ATR(ref) și identitate. Timestampul
+   ieșirii se actualizează și numărătoarea începe din nou la 1. Se verifică
+   imediat pragul de BREAKOUT pentru noua direcție, inclusiv pe această lumânare.
+3. Pentru direcția curentă se verifică pragul din secțiunea 6.3. Dacă este atins,
+   se produce BREAKOUT, inclusiv dacă aceasta este ultima lumânare permisă.
+4. **IPOTEZĂ:** dacă pragul nu este atins în 3 lumânări 4H consecutive, numărate
+   inclusiv de la lumânarea ieșirii (pozițiile 1, 2, 3), ieșirea se anulează la
+   închiderea celei de-a treia, cu motivul `EXIT_NO_BREAKOUT`.
+
+După `EXIT_NO_BREAKOUT`, simbolul nu poate fi rearmat cât timp close-urile
+rămân în afara unui canal valid. Este necesar un close 4H în interiorul unui
+canal valid calculat numai din lumânările anterioare lui; apoi se reia
+evaluarea normală din secțiunea 6.1. Nu se generează spargeri retroactive.
 
 ## 7. Retest și confirmare
 
@@ -899,7 +957,9 @@ Livrabilele viitoarei implementări vor fi:
 Pentru fiecare split, variantă, simbol și direcție:
 
 - canale valide;
-- spargeri;
+- intrări în ARMED, treceri în EXITED și spargeri BREAKOUT, separat;
+- reveniri din EXITED în canal și anulări `EXIT_NO_BREAKOUT`, numărate separat;
+- schimbări de parte în EXITED, cu noul timestamp al ieșirii;
 - retesturi;
 - confirmări;
 - ordine limit create;
@@ -916,6 +976,17 @@ Pentru fiecare split, variantă, simbol și direcție:
 - setup-uri eliminate de 3R față de 2R și rezultatul lor în varianta 2R.
 
 ### 23.2 Metrici de tranzacționare
+
+Pentru corectura definiției spargerii, prima rerulare după aprobarea
+implementării se limitează strict la perioada de dezvoltare. Walk-forward și
+perioada finală nu se rulează în acest pas. Raportul păstrează timestampurile
+ARMED, EXITED și BREAKOUT, identitatea canalului și motivul fiecărei anulări;
+ARMED se numără la intrarea în stare, nu la fiecare recalculare din aceeași stare.
+Revenirile și expirările se raportează chiar dacă nu s-a creat un setup BREAKOUT.
+
+Comparația retest versus intrare fără retest este un pas ulterior, separat,
+folosind aceleași canale și costuri. Rezultatele rămân exploratorii, pe istoric
+deja văzut; această rerulare nu constituie validare pe date neatinse.
 
 Metrica principală este **R mediu net după toate costurile**. Se mai raportează:
 
@@ -943,8 +1014,8 @@ MFE/MAE folosesc numai intervalul dintre fill și ieșirea finală, raportat la
 Implementarea viitoare trebuie să demonstreze prin teste:
 
 1. pivotul nu este disponibil înaintea celor două lumânări din dreapta;
-2. canalul și ATR(ref) nu se schimbă după spargere;
-3. lumânarea de spargere nu intră în canal;
+2. canalul și ATR(ref) nu se schimbă din momentul ieșirii EXITED, nici la BREAKOUT;
+3. lumânarea ieșirii și lumânările ulterioare până la BREAKOUT nu intră în canal;
 4. confirmarea nu poate umple ordinul în aceeași lumânare;
 5. fill-ul începe numai în lumânarea următoare;
 6. anulările funcționează înainte și după activarea ordinului;
@@ -963,7 +1034,32 @@ Implementarea viitoare trebuie să demonstreze prin teste:
 18. `TARGET_AT_OPEN`, `SL_AT_OPEN` și `INVALID_AT_OPEN` respectă prioritatea din
     secțiunea 9.4 și împiedică fill-ul;
 19. pentru intrarea market, `minimum_sl`, `SL_TOO_WIDE` și R:R folosesc
-    `entry_actual`, cu slippage inclus.
+    `entry_actual`, cu slippage inclus;
+20. WIF-USDT-SWAP, august 2025: canalul `U=1.0386`, `L=0.8942` nu produce
+    BREAKOUT. Cazul furnizat pentru regresie are close 4H `0.8572` la
+    `2025-08-15 12:00 UTC`, canal devenit valid abia la `2025-08-16 04:00 UTC`
+    (close `0.8811`) și vechea spargere la `2025-08-16 08:00 UTC` (close `0.8677`).
+    Fixture-ul păstrează explicit convenția timestampului OHLC și ora închiderii,
+    astfel încât eticheta lumânării să nu fie confundată cu momentul semnalului;
+21. ieșire mică, apoi prag atins pe lumânarea următoare: BREAKOUT pe a doua,
+    cu canalul și ATR(ref) înghețate la prima;
+22. ieșire urmată de close în `[L, U]`: nicio spargere, revenire la evaluarea
+    ARMED; egalitatea cu oricare margine este revenire;
+23. ieșire fără prag în trei lumânări: `EXIT_NO_BREAKOUT` la a treia, fără
+    rearmare până la revenirea cerută în secțiunea 6.4; prag atins chiar pe
+    a treia lumânare produce BREAKOUT, nu expirare;
+24. canal descoperit cu close anterior în afară: nicio armare și nicio spargere;
+25. toate tranzițiile ARMED/EXITED/BREAKOUT sunt simetrice LONG/SHORT;
+26. trecerea pe partea opusă în EXITED păstrează canalul și ATR(ref), schimbă
+    direcția, reinițializează numărătoarea și verifică imediat noul prag.
+
+După implementare se raportează pentru cazurile de audit `11 UNI (2022-06-21)`
+și `13 LTC (2026-10-08)` dacă spargerea se păstrează și de ce, cu close-urile,
+canalul și tranzițiile relevante. Acestea sunt verificări punctuale ale
+detectorului, nu autorizarea unei rerulări de portofoliu pe walk-forward/final.
+Observația furnizată de utilizator — 39 din 67 setup-uri pe 8 monede aveau
+close-ul anterior deja în afara canalului — motivează corectura, fără a fi
+prezentată ca rezultat al unei rerulări efectuate pentru această specificație.
 
 ## 25. Starea reală a golden test-ului v1 și reutilizarea infrastructurii
 
@@ -1013,7 +1109,15 @@ acestor date și aprobarea explicită a rezultatelor așteptate.
 
 ## 27. Decizii rămase deschise pentru aprobarea utilizatorului
 
-Nu mai există decizii deschise în această versiune a specificației. Valorile de
+Decizie încă deschisă pentru validarea ulterioară: termenul de 3 lumânări 4H
+în EXITED este **IPOTEZĂ**, valoare de pornire pentru corectură, nu prag validat.
+Nu se selectează acum alt termen pe baza rezultatelor deja văzute.
+
+Implementarea noii succesiuni de stări necesită aprobarea explicită separată
+`DA, implementează`. Comparația cu intrarea fără retest rămâne un task ulterior;
+această corectură nu îi definește și nu îi autorizează regulile de execuție.
+
+Valorile de
 pornire din fosta listă 1-12 și 14 sunt aprobate. Funding-ul real are acoperire
 suficientă conform secțiunii 16.1, iar `FUNDING_INCOMPLETE` rămâne protecția
 pentru goluri. V3 va folosi pipeline-ul separat stabilit în secțiunea 25.
