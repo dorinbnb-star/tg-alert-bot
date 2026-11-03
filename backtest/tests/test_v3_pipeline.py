@@ -43,6 +43,15 @@ def synthetic_market() -> dict[str, v3_engine.MarketData]:
 
 
 class V3PipelineTests(unittest.TestCase):
+    def test_funding_archive_windows_stay_below_ten_months_and_end_exclusive(self) -> None:
+        start = v3_data.parse_utc("2022-03-01T00:00:00Z")
+        end = v3_data.parse_utc("2026-11-01T00:00:00Z")
+        windows = v3_data.month_windows(start, end)
+        self.assertEqual(start, windows[0][0])
+        self.assertEqual(end - 1, windows[-1][1])
+        self.assertTrue(all(right < end for _, right in windows))
+        self.assertTrue(all(right - left < 276 * v3_strategy.DAY_MS for left, right in windows))
+
     def test_closed_candle_pipeline_detects_breakout_retest_confirmation_and_tp(self) -> None:
         config = dict(v3_engine.load_config(), symbols=["BTC-USDT-SWAP"])
         market = synthetic_market()

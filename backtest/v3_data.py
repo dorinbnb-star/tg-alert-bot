@@ -145,10 +145,12 @@ def month_windows(start_ms: int, end_ms: int) -> list[tuple[int, int]]:
     cursor = datetime(start.year, start.month, 1, tzinfo=timezone.utc)
     out = []
     while int(cursor.timestamp() * 1000) < end_ms:
-        year = cursor.year + (cursor.month - 1 + 10) // 12
-        month = (cursor.month - 1 + 10) % 12 + 1
+        # OKX documents a range below ten months; nine calendar months avoids
+        # the endpoint's inclusive-boundary 400 response at exactly ten months.
+        year = cursor.year + (cursor.month - 1 + 9) // 12
+        month = (cursor.month - 1 + 9) % 12 + 1
         next_cursor = datetime(year, month, 1, tzinfo=timezone.utc)
-        out.append((int(cursor.timestamp() * 1000), min(int(next_cursor.timestamp() * 1000) - 1, end_ms)))
+        out.append((int(cursor.timestamp() * 1000), min(int(next_cursor.timestamp() * 1000) - 1, end_ms - 1)))
         cursor = next_cursor
     return out
 
