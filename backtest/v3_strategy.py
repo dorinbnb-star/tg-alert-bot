@@ -307,6 +307,80 @@ def retest_zone(setup: Setup, params: Parameters) -> tuple[float, float]:
     return setup.reference_level - offset, setup.reference_level + offset
 
 
+@dataclass(frozen=True)
+class BreakoutState:
+    phase: str = "IDLE"
+    channel: Channel | None = None
+    direction: Direction | None = None
+    armed_ms: int | None = None
+    exit_ms: int | None = None
+    last_ms: int | None = None
+    bars: int = 0
+
+
+def advance_breakout(state: BreakoutState, candidate: Channel | None,
+                     previous_close: float, candle: Candle, params: Parameters
+                     ) -> tuple[BreakoutState, Setup | None, list[dict]]:
+    """Pure closed-4H state transition; no portfolio or future data access.
+
+    Three bars including the exit is the approved starting hypothesis.
+    Opposite-side exits restart the count, preserving frozen geometry.
+    """
+    from dataclasses import replace
+    now = candle.start_ms + FOUR_HOURS_MS
+    events: list[dict] = []
+    if state.last_ms is not None and now - state.last_ms != FOUR_HOURS_MS:
+        state = BreakoutState()
+
+    def record(status: str, current: BreakoutState) -> None:
+        ch = current.channel
+        events.append(dict(status=status, status_ms=now, armed_ms=current.armed_ms,
+                           exit_ms=current.exit_ms, direction=current.direction,
+                           channel_id=repr(ch.identity) if ch else None,
+                           upper=ch.upper if ch else None, lower=ch.lower if ch else None,
+                           atr_ref=ch.atr_ref if ch else None))
+
+    if state.phase == "BLOCKED":
+        if candidate is not None and candidate.lower <= candle.close <= candidate.upper:
+            state = BreakoutState("IDLE", last_ms=now)
+            record("EXIT_REARM_READY", replace(state, channel=candidate))
+        return replace(state, last_ms=now), None, events
+    if state.phase != "EXITED":
+        if candidate is None or not candidate.lower <= previous_close <= candidate.upper:
+            return BreakoutState(last_ms=now), None, events
+        newly_armed = state.phase != "ARMED"
+        state = BreakoutState("ARMED", candidate, armed_ms=now if newly_armed else state.armed_ms,
+                              last_ms=now)
+        if newly_armed:
+            record("ARMED", state)
+        if candidate.lower <= candle.close <= candidate.upper:
+            return state, None, events
+        direction = "LONG" if candle.close > candidate.upper else "SHORT"
+        state = replace(state, phase="EXITED", direction=direction, exit_ms=now, bars=1)
+        record("EXITED", state)
+    else:
+        channel = state.channel
+        if channel.lower <= candle.close <= channel.upper:
+            record("EXIT_RETURNED", state)
+            return BreakoutState("ARMED", armed_ms=state.armed_ms, last_ms=now), None, events
+        direction = "LONG" if candle.close > channel.upper else "SHORT"
+        if direction != state.direction:
+            state = replace(state, direction=direction, exit_ms=now, bars=1)
+            record("EXIT_SIDE_CHANGED", state)
+            record("EXITED", state)
+        else:
+            state = replace(state, bars=state.bars + 1)
+        state = replace(state, last_ms=now)
+    setup = breakout_setup(state.channel, candle, params)
+    if setup is not None and setup.direction == state.direction:
+        record("BREAKOUT", state)
+        return BreakoutState(last_ms=now), setup, events
+    if state.bars >= 3:
+        record("EXIT_NO_BREAKOUT", state)
+        return BreakoutState("BLOCKED", last_ms=now), None, events
+    return state, None, events
+
+
 def touches_retest(setup: Setup, candle: Candle, params: Parameters) -> bool:
     if candle.start_ms < setup.breakout_close_ms:
         return False

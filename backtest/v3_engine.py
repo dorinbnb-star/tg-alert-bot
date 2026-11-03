@@ -138,6 +138,7 @@ class RunResult:
     setups: list[dict]
     trades: list[dict]
     ending_equity: float
+    transitions: list[dict] = field(default_factory=list)
 
 
 def load_config(path: Path | None = None) -> dict:
@@ -200,6 +201,8 @@ class PortfolioEngine:
         self.trades: list[dict] = []
         self.equity = float(config.get("starting_equity", 100_000.0))
         self.random_seed = random_seed
+        self.breakout_states: dict[str, strategy.BreakoutState] = {}
+        self.transitions: list[dict] = []
 
     def _slippage(self, symbol: str) -> float:
         table = self.costs["slippage_rate"]
@@ -727,20 +730,28 @@ class PortfolioEngine:
 
     def _maybe_breakout(self, symbol: str, h4_index: int) -> None:
         if symbol in self.active or symbol in self.pending or symbol in self.positions:
+            self.breakout_states.pop(symbol, None)
             return
         prepared = self.prepared[symbol]
         channel = prepared.channels.get(h4_index)
-        if channel is None or channel.identity in self.used_channels:
-            return
+        if channel is not None and channel.identity in self.used_channels:
+            channel = None
         previous = self.last_breakout.get(symbol)
-        if previous is not None:
+        if previous is not None and channel is not None:
             if sum(pivot.start_ms > previous for pivot in channel.high_pivots) < 2:
-                return
-            if sum(pivot.start_ms > previous for pivot in channel.low_pivots) < 2:
-                return
-        setup = strategy.breakout_setup(channel, prepared.data.h4[h4_index], self.params)
+                channel = None
+            elif sum(pivot.start_ms > previous for pivot in channel.low_pivots) < 2:
+                channel = None
+        state, setup, events = strategy.advance_breakout(
+            self.breakout_states.get(symbol, strategy.BreakoutState()), channel,
+            prepared.data.h4[h4_index - 1].close if h4_index else float('nan'),
+            prepared.data.h4[h4_index], self.params)
+        self.breakout_states[symbol] = state
+        self.transitions.extend(dict(event, symbol=symbol, variant=self.variant.key,
+                                     direction=event['direction'] or 'UNASSIGNED') for event in events)
         if setup is None:
             return
+        channel = setup.channel
         if not self._filter_allows(prepared, h4_index):
             temp = ActiveSetup(setup)
             self._record_setup(symbol, temp, f"FILTER_REJECTED_{self.variant.filter_mode}", setup.breakout_close_ms)
@@ -830,7 +841,7 @@ class PortfolioEngine:
             last = self.prepared[symbol].data.h1[-1]
             self._close_fraction(position, position.remaining, last.close, last.start_ms + strategy.HOUR_MS, "RUNNER")
             self._finish(symbol, "DATA_END", last.start_ms + strategy.HOUR_MS)
-        return RunResult(self.variant.key, self.setups, self.trades, self.equity)
+        return RunResult(self.variant.key, self.setups, self.trades, self.equity, self.transitions)
 
 
 def prepare_market(market: dict[str, MarketData], config: dict) -> dict[str, Prepared]:

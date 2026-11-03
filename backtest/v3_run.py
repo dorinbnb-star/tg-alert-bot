@@ -12,7 +12,7 @@ import statistics
 import sys
 from pathlib import Path
 
-from backtest import v3_data, v3_engine, v3_report
+from backtest import v3_data, v3_engine, v3_report, v3_strategy
 
 ROOT = Path(__file__).resolve().parents[1]
 COSTS_PATH = Path(__file__).with_name("costs.json")
@@ -265,6 +265,62 @@ def random_baseline(market: dict, config: dict, costs: dict, chosen: v3_engine.V
     }
 
 
+def development_only(market: dict, config: dict, costs: dict, bounds: dict, output: Path) -> int:
+    """Replay only closed bars inside the original development boundary.
+
+    Bounds come from the previous run; never recompute the split on truncated
+    data or simulate validation trades and discard them afterwards.
+    """
+    from collections import Counter
+    end = int(bounds['development_end_ms'])
+    if set(market) != set(config['symbols']):
+        raise ValueError('Development replay requires the complete configured watchlist')
+    clipped = {}
+    for symbol, data in market.items():
+        clipped[symbol] = v3_engine.MarketData(
+            [c for c in data.h1 if c.start_ms + v3_strategy.HOUR_MS <= end],
+            [c for c in data.h4 if c.start_ms + v3_strategy.FOUR_HOURS_MS <= end],
+            [c for c in data.daily if c.start_ms + v3_strategy.DAY_MS <= end],
+            [r for r in data.funding if int(r['fundingTime']) <= end], data.tick_size)
+    prepared = v3_engine.prepare_market(clipped, config)
+    events, setups, trades, metrics = [], [], [], []
+    for variant in v3_engine.variants():
+        print(f'development only: {variant.key}', flush=True)
+        result = v3_engine.run_variant(clipped, config, costs, variant, prepared)
+        events.extend(result.transitions)
+        setups.extend(result.setups)
+        trades.extend(result.trades)
+        metrics.append(dict(variant=variant.key, **v3_report.metrics(result.trades)))
+    if any(r['exit_ms'] > end for r in trades) or any(r['status_ms'] > end for r in events):
+        raise AssertionError('Development boundary exceeded')
+    for rows in (setups, trades, events):
+        for row in rows:
+            row['split'] = 'development'
+    output.mkdir(parents=True, exist_ok=True)
+    write_csv(output / 'v3-transitions.csv', events)
+    write_csv(output / 'v3-setups.csv', collapse_setups(setups))
+    write_csv(output / 'v3-trades.csv', trades)
+    funnel = {v.key: dict(Counter(r['status'] for r in events if r['variant'] == v.key))
+              for v in v3_engine.variants()}
+    payload = dict(scope='development_only', exploratory=True, original_bounds=bounds,
+                   metrics=metrics, transition_funnel=funnel,
+                   transition_funnel_by_symbol=aggregate_funnel(events),
+                   setup_funnel=aggregate_funnel(setups),
+                   boundary_exits=sum(r['outcome'] == 'DATA_END' for r in trades))
+    (output / 'v3-metrics.json').write_text(json.dumps(json_safe(payload), indent=2) + '\n', encoding='utf-8')
+    lines = ['# V3 — corectura spargerii, doar dezvoltare', '',
+             'Rezultate exploratorii pe istoric deja văzut. Fără walk-forward sau final.',
+             'Pozițiile rămase la limita dezvoltării sunt închise DATA_END și raportate separat.',
+             'Nu s-a comparat intrarea fără retest și nu s-au optimizat praguri.', '',
+             f"Limita exclusivă a datelor: {v3_data.iso(end)}", '',
+             '| Variantă | Tranzacții | R mediu net |', '|---|---:|---:|']
+    for metric in metrics:
+        lines.append(f"| {metric['variant']} | {metric['n']} | {metric['mean_r']} |")
+    lines += ['', '## Tranziții', '', '```json', json.dumps(funnel, indent=2), '```']
+    (output / 'v3-report.md').write_text('\n'.join(lines) + '\n', encoding='utf-8')
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-dir", default=str(v3_data.DATA_DIR))
@@ -272,9 +328,24 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--baseline-seeds", type=int)
     parser.add_argument("--skip-sensitivity", action="store_true")
     parser.add_argument("--quiet", action="store_true")
+    parser.add_argument('--development-only', action='store_true')
+    parser.add_argument('--reference-metrics', type=Path,
+                        help='Original v3-metrics.json containing fixed split_bounds')
     args = parser.parse_args(argv)
     config = v3_engine.load_config()
     costs = json.loads(COSTS_PATH.read_text(encoding="utf-8"))
+    if args.development_only:
+        if args.reference_metrics is None:
+            parser.error('--development-only requires --reference-metrics')
+        manifest = v3_data.load_manifest(Path(args.data_dir))
+        for symbol in config['symbols']:
+            for bar in ('1H', '4H', '1D', 'funding'):
+                path = v3_data.series_path(Path(args.data_dir), symbol, bar)
+                if not path.exists() or v3_data.rows_sha(path) != manifest[symbol][bar]['sha256']:
+                    raise ValueError(f'Missing or changed original data: {symbol} {bar}')
+        bounds = json.loads(args.reference_metrics.read_text(encoding='utf-8'))['diagnostics']['split_bounds']
+        market = v3_data.load_market(Path(args.data_dir), config['symbols'])
+        return development_only(market, config, costs, bounds, Path(args.results_dir))
     market = v3_data.load_market(Path(args.data_dir), config["symbols"])
     prepared = v3_engine.prepare_market(market, config)
     bounds = split_bounds(prepared, config)
@@ -309,6 +380,8 @@ def main(argv: list[str] | None = None) -> int:
     kept_results.update(filter_results)
     all_setups = [dict(row) for result in kept_results.values() for row in result.setups]
     all_trades = [dict(row) for result in kept_results.values() for row in result.trades]
+    transitions = [dict(row) for result in kept_results.values() for row in result.transitions]
+    add_splits(transitions, bounds, 'status_ms')
     add_splits(all_setups, bounds, "breakout_ms")
     add_splits(all_trades, bounds, "entry_ms")
 
@@ -366,15 +439,19 @@ def main(argv: list[str] | None = None) -> int:
     payload = {"diagnostics": diagnostics, "coverage": coverage, "metrics": metric_rows,
                "funnel": funnel_rows, "eliminated_by_rr3": eliminated,
                "baseline": baseline, "sensitivity": sensitivity, "plateau": plateau}
+    payload['transition_funnel'] = aggregate_funnel(transitions)
     results_dir = Path(args.results_dir)
     write_csv(results_dir / "v3-setups.csv", setup_rows)
     write_csv(results_dir / "v3-trades.csv", all_trades)
+    write_csv(results_dir / 'v3-transitions.csv', transitions)
     (results_dir / "v3-metrics.json").write_text(
         json.dumps(json_safe(payload), indent=2, sort_keys=True, allow_nan=False) + "\n", encoding="utf-8",
     )
     report = v3_report.render(
         all_setups, all_trades, bounds, selection, baseline, sensitivity, coverage, plateau, eliminated,
     )
+    report += '\n## Tranziții ARMED / EXITED / BREAKOUT\n\n```json\n' + json.dumps(
+        payload['transition_funnel'], indent=2) + '\n```\n'
     (results_dir / "v3-report.md").write_text(report, encoding="utf-8")
     if not args.quiet:
         encoding = sys.stdout.encoding or "utf-8"
