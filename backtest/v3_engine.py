@@ -11,7 +11,7 @@ from typing import Literal, Sequence
 
 from backtest import v3_strategy as strategy
 
-EntryMode = Literal["ENTRY_LIMIT", "ENTRY_MARKET_NEXT_OPEN"]
+EntryMode = Literal["ENTRY_LIMIT", "ENTRY_MARKET_NEXT_OPEN", "ENTRY_BREAKOUT_NEXT_OPEN"]
 ExitFamily = Literal["REFERENCE", "SPLIT"]
 BreakevenMode = Literal["BE_AFTER_TP1", "BE_AFTER_TP2", "NO_BE"]
 FilterMode = Literal["BASE", "VOLUME", "CHOCH_PAUSE_12", "CHOCH_NEW_STRUCTURE"]
@@ -24,6 +24,10 @@ class Variant:
     minimum_rr: float
     breakeven: BreakevenMode = "NO_BE"
     filter_mode: FilterMode = "BASE"
+
+    @property
+    def market_entry(self) -> bool:
+        return self.entry_mode in ('ENTRY_MARKET_NEXT_OPEN', 'ENTRY_BREAKOUT_NEXT_OPEN')
 
     @property
     def key(self) -> str:
@@ -180,6 +184,10 @@ class PortfolioEngine:
         self.params = strategy.Parameters.from_dict(config)
         self.costs = costs
         self.variant = variant
+        if variant.entry_mode == 'ENTRY_BREAKOUT_NEXT_OPEN' and (
+                variant.exit_family != 'REFERENCE' or variant.filter_mode != 'BASE'
+                or variant.minimum_rr not in (2, 3) or random_seed is not None):
+            raise ValueError('Breakout entry supports only unfiltered REF_RR2 / REF_RR3')
         self.symbols = [symbol for symbol in config["symbols"] if symbol in market]
         self.rank = {symbol: index for index, symbol in enumerate(config["symbols"])}
         self.prepared = prepared or {symbol: prepare(market[symbol], self.params) for symbol in self.symbols}
@@ -258,10 +266,10 @@ class PortfolioEngine:
     ) -> None:
         self._current_slippage = self._slippage(symbol)
         estimated_cost = self._estimated_risk_cost(
-            symbol, effective if self.variant.entry_mode == "ENTRY_MARKET_NEXT_OPEN" else pending.entry_plan,
-            stop, self.variant.entry_mode == "ENTRY_MARKET_NEXT_OPEN",
+            symbol, effective if self.variant.market_entry else pending.entry_plan,
+            stop, self.variant.market_entry,
         )
-        entry_basis = effective if self.variant.entry_mode == "ENTRY_MARKET_NEXT_OPEN" else pending.entry_plan
+        entry_basis = effective if self.variant.market_entry else pending.entry_plan
         risk_unit = abs(entry_basis - stop) + estimated_cost
         budget = float(self.config["risk_fraction"]) * self.equity
         qty = budget / risk_unit
@@ -394,6 +402,9 @@ class PortfolioEngine:
             "runner_net_r": position.tranche_pnl["RUNNER"] / position.r0,
             **position.daily_context,
         }
+        if self.variant.entry_mode == 'ENTRY_BREAKOUT_NEXT_OPEN':
+            row['signal_ms'] = position.setup.breakout_close_ms
+            row['confirmation_ms'] = None
         self.trades.append(row)
 
     def _process_position(self, symbol: str, candle: strategy.Candle) -> None:
@@ -631,6 +642,10 @@ class PortfolioEngine:
     def _market_candidate(self, symbol: str, candle: strategy.Candle) -> tuple | None:
         pending = self.pending.get(symbol)
         active = self.active.get(symbol)
+        if (self.variant.entry_mode == 'ENTRY_BREAKOUT_NEXT_OPEN' and pending is not None
+                and candle.start_ms > pending.active_ms):
+            self._cancel(symbol, 'DATA_MISSING', candle.start_ms)
+            return None
         if pending is None or active is None or pending.active_ms != candle.start_ms:
             return None
         self._current_slippage = self._slippage(symbol)
@@ -766,6 +781,19 @@ class PortfolioEngine:
                 return
         self.active[symbol] = active
         self._record_setup(symbol, active, "BREAKOUT", setup.breakout_close_ms)
+        if self.variant.entry_mode == 'ENTRY_BREAKOUT_NEXT_OPEN':
+            # Reuse the market-open validator and priority timestamp, without
+            # invoking retest/confirmation or inspecting the next 1H candle.
+            signal_ms = setup.breakout_close_ms
+            hour_index = prepared.h1_by_start.get(signal_ms - strategy.HOUR_MS)
+            atr1 = prepared.atr1[hour_index] if hour_index is not None else None
+            if atr1 is None:
+                self._cancel(symbol, 'DATA_MISSING', signal_ms)
+                return
+            self.pending[symbol] = PendingEntry(signal_ms, signal_ms, setup.reference_level,
+                                                0.0, atr1, None)
+            self._record_setup(symbol, active, 'MARKET_PENDING', signal_ms,
+                               signal_ms=signal_ms, atr1_at_signal=atr1)
 
     def _random_confirmation(self, symbol: str, setup: strategy.Setup) -> int | None:
         prepared = self.prepared[symbol]
@@ -818,7 +846,7 @@ class PortfolioEngine:
                 if symbol in current and symbol in self.positions:
                     self._process_position(symbol, current[symbol])
 
-            if self.variant.entry_mode == "ENTRY_MARKET_NEXT_OPEN":
+            if self.variant.market_entry:
                 candidates = [item for symbol in self.symbols if symbol in current
                               if (item := self._market_candidate(symbol, current[symbol])) is not None]
             else:

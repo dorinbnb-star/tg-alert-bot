@@ -265,7 +265,92 @@ def random_baseline(market: dict, config: dict, costs: dict, chosen: v3_engine.V
     }
 
 
-def development_only(market: dict, config: dict, costs: dict, bounds: dict, output: Path) -> int:
+def entry_comparison(results: dict, output: Path, bounds: dict) -> None:
+    """Pair reference trades by exact channel identity, separately for each RR."""
+    from collections import Counter
+    reasons = ('TARGET_AT_OPEN', 'SL_AT_OPEN', 'INVALID_AT_OPEN', 'SL_TOO_WIDE',
+               'RR_REJECTED', 'REJECTED_POSITION_LIMIT', 'DATA_MISSING')
+    summary, pairs, exclusive, missed_targets = [], [], [], []
+    for rr in (2, 3):
+        left = results[f'ENTRY_MARKET_NEXT_OPEN__REF_RR{rr}']
+        right = results[f'ENTRY_BREAKOUT_NEXT_OPEN__REF_RR{rr}']
+        a, b = ({r['channel_id']: r for r in result.trades} for result in (left, right))
+        if len(a) != len(left.trades) or len(b) != len(right.trades):
+            raise ValueError('Duplicate trade channel in comparison')
+        for channel in sorted(a.keys() & b.keys()):
+            x, y = a[channel], b[channel]
+            pairs.append(dict(rr=rr, channel_id=channel,
+                              retest_entry_utc=v3_data.iso(x['entry_ms']),
+                              breakout_entry_utc=v3_data.iso(y['entry_ms']),
+                              retest_net_r=x['net_r'], breakout_net_r=y['net_r'],
+                              difference_r=y['net_r']-x['net_r'],
+                              retest_outcome=x['outcome'], breakout_outcome=y['outcome']))
+        for own, other, name in ((a, b, left.variant), (b, a, right.variant)):
+            for channel in sorted(own.keys()-other.keys()):
+                row = own[channel]
+                exclusive.append(dict(rr=rr, variant=name, channel_id=channel,
+                                      entry_utc=v3_data.iso(row['entry_ms']),
+                                      outcome=row['outcome'], net_r=row['net_r']))
+        last_status = {r['channel_id']: r['final_status'] for r in collapse_setups(right.setups)}
+        for row in collapse_setups(left.setups):
+            if row['final_status'] != 'TARGET_BEFORE_ENTRY':
+                continue
+            trade = b.get(row['channel_id'])
+            missed_targets.append(dict(rr=rr, channel_id=row['channel_id'],
+                                       breakout_utc=v3_data.iso(row['breakout_ms']),
+                                       became_trade=trade is not None,
+                                       outcome=trade['outcome'] if trade else last_status.get(row['channel_id'], 'NO_SETUP'),
+                                       net_r=trade['net_r'] if trade else None))
+        for result, own, other in ((left, a, b), (right, b, a)):
+            rejected = Counter(r['status'] for r in result.setups if r['status'] in reasons)
+            summary.append(dict(variant=result.variant, metrics=v3_report.metrics(result.trades),
+                                cost_x2=v3_report.metrics(result.trades, key='net_r_cost_x2'),
+                                rejections={key: rejected[key] for key in reasons},
+                                common=v3_report.metrics([own[k] for k in own.keys() & other.keys()]),
+                                exclusive=v3_report.metrics([own[k] for k in own.keys()-other.keys()]),
+                                data_end=[r for r in result.trades if r['outcome']=='DATA_END']))
+    payload = dict(scope='development_only', end_utc=v3_data.iso(bounds['development_end_ms']),
+                   exploratory=True, variants=summary, common=pairs, exclusive=exclusive,
+                   target_before_entry=missed_targets)
+    (output/'v3-entry-comparison.json').write_text(json.dumps(json_safe(payload), indent=2)+'\n', encoding='utf-8')
+    write_csv(output/'v3-common-channels.csv', pairs)
+    write_csv(output/'v3-exclusive-channels.csv', exclusive)
+    write_csv(output/'v3-target-before-entry.csv', missed_targets)
+    lines = ['# V3: retest versus intrare după spargere', '',
+             'Exploratoriu: istoric deja văzut, eșantion mic. Numai dezvoltare.',
+             f"Limită exclusivă: {payload['end_utc']}. Fără walk-forward/final sau filtre noi.",
+             'Aceleași reguli de canal și costuri; disponibilitatea simbolului și a sloturilor rămâne proprie fiecărui portofoliu.',
+             'Limita de 3,55R pentru intrarea limit NU se aplică intrării market după spargere.', '',
+             '| Variantă | N | Win rate | R mediu net | PF | DD R | DD % | R mediu costuri ×2 |',
+             '|---|---:|---:|---:|---:|---:|---:|---:|']
+    for row in summary:
+        m = row['metrics']; f = v3_report.fmt
+        lines.append(f"| {row['variant']} | {m['n']} | {f(m['win_rate'])} | {f(m['mean_r'])} | {f(m['profit_factor'])} | {f(m['max_drawdown_r'])} | {f(100*m['max_drawdown_pct'])} | {f(row['cost_x2']['mean_r'])} |")
+    lines += ['', '## Respingeri la open', '', '| Variantă | Motiv | Număr |', '|---|---|---:|']
+    for row in summary:
+        for reason, count in row['rejections'].items():
+            lines.append(f"| {row['variant']} | {reason} | {count} |")
+    lines += ['', '## Canale comune și exclusive', '', '| Variantă | Comune N | Comune R mediu | Exclusive N | Exclusive R mediu |', '|---|---:|---:|---:|---:|']
+    for row in summary:
+        lines.append(f"| {row['variant']} | {row['common']['n']} | {v3_report.fmt(row['common']['mean_r'])} | {row['exclusive']['n']} | {v3_report.fmt(row['exclusive']['mean_r'])} |")
+    for title, rows in [('Perechi (diferență = fără retest minus cu retest)', pairs),
+                        ('Lista tranzacțiilor exclusive', exclusive),
+                        ('TARGET_BEFORE_ENTRY din varianta cu retest', missed_targets)]:
+        lines += ['', '## '+title, '', '```json', json.dumps(rows, indent=2), '```']
+    lines += ['', '## Conversia TARGET_BEFORE_ENTRY și DATA_END', '']
+    for rr in (2, 3):
+        rows = [r for r in missed_targets if r['rr']==rr]
+        converted = [r for r in rows if r['became_trade']]
+        lines.append(f"REF_RR{rr}: {len(converted)}/{len(rows)} devenite tranzacții; rezultate: {dict(Counter(r['outcome'] for r in converted))}.")
+    for row in summary:
+        lines.append(f"{row['variant']}: {len(row['data_end'])} închideri DATA_END.")
+        for trade in row['data_end']:
+            lines.append(f"- {trade['channel_id']}: {trade['net_r']:+.6f}R")
+    (output/'v3-entry-comparison.md').write_text('\n'.join(lines)+'\n', encoding='utf-8')
+
+
+def development_only(market: dict, config: dict, costs: dict, bounds: dict, output: Path,
+                     compare_entries: bool = False) -> int:
     """Replay only closed bars inside the original development boundary.
 
     Bounds come from the previous run; never recompute the split on truncated
@@ -284,9 +369,14 @@ def development_only(market: dict, config: dict, costs: dict, bounds: dict, outp
             [r for r in data.funding if int(r['fundingTime']) <= end], data.tick_size)
     prepared = v3_engine.prepare_market(clipped, config)
     events, setups, trades, metrics = [], [], [], []
-    for variant in v3_engine.variants():
+    selected = (tuple(v3_engine.Variant(mode, 'REFERENCE', rr)
+                      for mode in ('ENTRY_MARKET_NEXT_OPEN', 'ENTRY_BREAKOUT_NEXT_OPEN')
+                      for rr in (2, 3)) if compare_entries else v3_engine.variants())
+    results = {}
+    for variant in selected:
         print(f'development only: {variant.key}', flush=True)
         result = v3_engine.run_variant(clipped, config, costs, variant, prepared)
+        results[variant.key] = result
         events.extend(result.transitions)
         setups.extend(result.setups)
         trades.extend(result.trades)
@@ -301,7 +391,7 @@ def development_only(market: dict, config: dict, costs: dict, bounds: dict, outp
     write_csv(output / 'v3-setups.csv', collapse_setups(setups))
     write_csv(output / 'v3-trades.csv', trades)
     funnel = {v.key: dict(Counter(r['status'] for r in events if r['variant'] == v.key))
-              for v in v3_engine.variants()}
+              for v in selected}
     payload = dict(scope='development_only', exploratory=True, original_bounds=bounds,
                    metrics=metrics, transition_funnel=funnel,
                    transition_funnel_by_symbol=aggregate_funnel(events),
@@ -311,13 +401,16 @@ def development_only(market: dict, config: dict, costs: dict, bounds: dict, outp
     lines = ['# V3 — corectura spargerii, doar dezvoltare', '',
              'Rezultate exploratorii pe istoric deja văzut. Fără walk-forward sau final.',
              'Pozițiile rămase la limita dezvoltării sunt închise DATA_END și raportate separat.',
-             'Nu s-a comparat intrarea fără retest și nu s-au optimizat praguri.', '',
+             ('Comparația intrărilor este în v3-entry-comparison.md; fără optimizarea pragurilor.'
+              if compare_entries else 'Nu s-a comparat intrarea fără retest și nu s-au optimizat praguri.'), '',
              f"Limita exclusivă a datelor: {v3_data.iso(end)}", '',
              '| Variantă | Tranzacții | R mediu net |', '|---|---:|---:|']
     for metric in metrics:
         lines.append(f"| {metric['variant']} | {metric['n']} | {metric['mean_r']} |")
     lines += ['', '## Tranziții', '', '```json', json.dumps(funnel, indent=2), '```']
     (output / 'v3-report.md').write_text('\n'.join(lines) + '\n', encoding='utf-8')
+    if compare_entries:
+        entry_comparison(results, output, bounds)
     return 0
 
 
@@ -329,9 +422,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--skip-sensitivity", action="store_true")
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument('--development-only', action='store_true')
+    parser.add_argument('--compare-entries', action='store_true')
     parser.add_argument('--reference-metrics', type=Path,
                         help='Original v3-metrics.json containing fixed split_bounds')
     args = parser.parse_args(argv)
+    if args.compare_entries and not args.development_only:
+        parser.error('--compare-entries requires --development-only')
     config = v3_engine.load_config()
     costs = json.loads(COSTS_PATH.read_text(encoding="utf-8"))
     if args.development_only:
@@ -344,8 +440,10 @@ def main(argv: list[str] | None = None) -> int:
                 if not path.exists() or v3_data.rows_sha(path) != manifest[symbol][bar]['sha256']:
                     raise ValueError(f'Missing or changed original data: {symbol} {bar}')
         bounds = json.loads(args.reference_metrics.read_text(encoding='utf-8'))['diagnostics']['split_bounds']
+        if args.compare_entries and bounds['development_end_ms'] != v3_data.parse_utc('2024-12-23T09:36:00Z'):
+            parser.error('Entry comparison requires the approved development boundary')
         market = v3_data.load_market(Path(args.data_dir), config['symbols'])
-        return development_only(market, config, costs, bounds, Path(args.results_dir))
+        return development_only(market, config, costs, bounds, Path(args.results_dir), args.compare_entries)
     market = v3_data.load_market(Path(args.data_dir), config["symbols"])
     prepared = v3_engine.prepare_market(market, config)
     bounds = split_bounds(prepared, config)

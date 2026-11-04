@@ -1127,3 +1127,66 @@ Regula pentru țintele structurale rămâne neschimbată: lipsa lor produce
 introduce în această versiune o țintă alternativă bazată pe W.
 
 Implementarea rămâne oprită până la mesajul explicit `DA, implementează`.
+
+## 28. Comparație aprobată: ENTRY_BREAKOUT_NEXT_OPEN, numai dezvoltare
+
+Aprobarea explicită a acestui experiment autorizează numai varianta și
+comparația descrise aici. Nu schimbă pragurile, configurația sau costurile.
+
+### 28.1 Semnal și execuție
+
+`ENTRY_BREAKOUT_NEXT_OPEN` folosește BREAKOUT din secțiunea 6.3, cu aceeași
+construcție a canalului și succesiune ARMED → EXITED → BREAKOUT. Nu așteaptă
+retest sau confirmare 1H. Intră la open-ul primei lumânări 1H care începe la
+închiderea spargerii 4H, cu slippage market din `costs.json`: `entry_actual`.
+Decizia nu citește high/low/close-ul acelei lumânări. Dacă lumânarea necesară
+lipsește, se raportează DATA_MISSING; nu se amână intrarea la un open ulterior.
+
+ATR14(1H) este cel cunoscut la închiderea spargerii 4H. SL folosește formula
+existentă: structural la 1,0×ATR(ref), minimum 1,5×ATR14(1H), față de
+`entry_actual`. Aceeași distanță maximă până la SL și același calcul R:R.
+
+La open, prima condiție adevărată respinge intrarea, în ordinea:
+TARGET_AT_OPEN, SL_AT_OPEN, INVALID_AT_OPEN, SL_TOO_WIDE, RR_REJECTED,
+REJECTED_POSITION_LIMIT. Se reutilizează verificările din secțiunea 9.4.
+Prioritatea rămâne timpul semnalului, apoi ordinea simbolurilor configurate;
+pentru varianta nouă timpul semnalului este închiderea spargerii, nu o confirmare.
+În diagnostic, confirmarea 1H este absentă, iar timpul semnalului se salvează separat.
+
+Numai TP unic de referință U+W / L−W, timeout 240h, funding real, aceleași
+costuri și maximum trei poziții. LONG/SHORT sunt simetrice. Numai REF_RR2 și
+REF_RR3; fără tranșe, filtre de volum/CHoCH, baseline aleator sau optimizare.
+Limita de 3,55R din secțiunea 11 NU se aplică: intrarea market poate fi mai
+departe de marginea canalului și poate avea R:R mai mic.
+
+### 28.2 Comparație și livrabile
+
+Se compară doar ENTRY_MARKET_NEXT_OPEN (cu retest) și ENTRY_BREAKOUT_NEXT_OPEN,
+pentru REF_RR2 și REF_RR3. Limita exclusivă a dezvoltării rămâne
+`2024-12-23 09:36 UTC`. Datele se taie înainte de simulare; walk-forward și
+final nu se rulează. Toate cele 72 de serii trebuie să corespundă hash-urilor
+manifestului original; orice diferență oprește rularea.
+
+Pentru fiecare variantă: număr de tranzacții, win rate, R mediu net, profit
+factor, drawdown maxim în R și procente, sensibilitatea costurilor ×2 și
+respingerile la open pe fiecare motiv. DATA_END se raportează separat.
+
+Perechile se formează prin channel_id exact, separat pentru fiecare prag R:R:
+număr și R mediu pentru tranzacțiile comune, diferența de R pe fiecare pereche
+(fără retest minus cu retest), număr și R mediu pentru exclusive, lista completă
+a exclusivelor cu ID, dată și rezultat. Se păstrează aceleași reguli de canal;
+disponibilitatea simbolului și a sloturilor de portofoliu se aplică independent
+în fiecare variantă, conform regulilor existente.
+
+Pentru setup-urile TARGET_BEFORE_ENTRY din varianta cu retest (11 în referința
+REF_RR2), se listează câte devin tranzacții, rezultatul TP/SL/TIMEOUT sau DATA_END,
+R net și motivul absenței unei tranzacții acolo unde acesta există.
+
+Raportul și listele verificabile se salvează în directorul de rezultate separat:
+`v3-entry-comparison.md`, `v3-entry-comparison.json`, `v3-common-channels.csv`,
+`v3-exclusive-channels.csv` și `v3-target-before-entry.csv`.
+Rezultatele rămân exploratorii, pe istoric deja văzut, cu eșantion mic.
+
+Teste obligatorii: open-ul primei lumânări fără viitor, ordinea respingerilor,
+SL/SL_TOO_WIDE/R:R față de prețul cu slippage, absența apelurilor la retest și
+confirmare, simetrie LONG/SHORT, respectarea limitei de poziții și a perioadei.
