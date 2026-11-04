@@ -162,25 +162,23 @@ Profit factor = suma R net pozitive împărțită la valoarea absolută a
 sumei R net negative; fără pierderi și cu câștiguri este infinit, iar
 fără câștiguri și fără pierderi este nedefinit.
 
-## 9. Decizii deschise
+## 9. Decizii aprobate înainte de implementare
 
 1. **SL minim.** Da, bufferul poate produce un SL sub 1,5 × ATR14 1H:
    dacă sweep-ul e foarte puțin adânc și 2 tick-uri sunt sub 1,5 ATR,
-   distanța structurală plus buffer poate rămâne sub prag. IPOTEZĂ:
+   distanța structurală plus buffer poate rămâne sub prag. Regulă fixă:
    distanța de la entry planificat la SL să fie maximul dintre distanța
    structurală și 1,5 × ATR14 1H la confirmare. Recalculează R:R și
-   cantitatea după rotunjire. Compară cu formula structurală pe dezvoltare.
-2. **Adâncime maximă.** IPOTEZĂ: maximum 1,0 × ATR14 1H, înghețat la
+   cantitatea după rotunjire. Fără variantă cu SL mai scurt.
+2. **Adâncime maximă.** Regulă fixă: maximum 1,0 × ATR14 1H, înghețat la
    deschiderea lumânării sweep-ului, aplicat excursiei maxime din episod
    până la reclaim inclusiv. Peste prag anulează episodul; nu declara
-   automat că este o spargere. Compară cu varianta fără plafon.
-3. **Consumarea pivotului.** Propunere: la prima confirmare validă de
+   automat că este o spargere. Fără variantă fără plafon.
+3. **Consumarea pivotului.** La prima confirmare validă de
    structură, înainte de filtrele SL/TP/R:R, per simbol, direcție și ora
    lumânării pivot 4H. Un ordin necreat, neexecutat, anulat sau expirat
    nu reactivează pivotul. Un episod fără confirmare nu îl consumă.
-4. **Fereastra de patru lumânări.** Propunere, IPOTEZĂ: include atât
+4. **Fereastra de patru lumânări.** Include atât
    reclaim-ul, cât și confirmarea, în patru bare consecutive s…s+3,
    unde s este sweep-ul. Reclaim-ul poate fi în s, confirmarea trebuie
-   să fie strict ulterioară. Alternativa de aprobat înainte de test:
-   reclaim până la s+3 inclusiv, apoi confirmare în maximum patru bare
-   începând cu prima bară după reclaim.
+   să fie strict ulterioară.
