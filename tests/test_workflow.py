@@ -27,8 +27,8 @@ FORBIDDEN = (
     "alert_sent",
 )
 NEVER = ("api.telegram.org", "--env-file", "verify-telegram", "test-telegram", "sleep")
-LIVE_PATH = "github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.triggering_actor == 'github-actions[bot]')"
-LIVE_STEP = "Live scan (OKX public candles, Telegram only on confirmed entry or result, writes Step Summary)"
+LIVE_PATH = "github.ref == 'refs/heads/main' && github.run_attempt == 1 && (github.event_name == 'schedule' || github.triggering_actor == 'github-actions[bot]')"
+LIVE_STEP = "Live scan (OKX public candles, BTC/ETH candidates and paper results)"
 DRY_STEP = "Dry-run scan (OKX public candles, no Telegram, writes Step Summary)"
 
 
@@ -131,7 +131,7 @@ class WorkflowDryRunOnlyTests(unittest.TestCase):
 
     def test_dry_run_path_never_sees_secrets_or_sends(self) -> None:
         dry = monitor_steps()[DRY_STEP]
-        self.assertIn('entry_monitor.py scan --root "$GITHUB_WORKSPACE" --dry-run', dry)
+        self.assertIn('ai_crypto_monitor.candidate_monitor --root "$GITHUB_WORKSPACE" --dry-run', dry)
         for fragment in ("secrets.", "TELEGRAM", "--send"):
             self.assertNotIn(fragment, dry)
         env_names = re.findall(r"^\s{10}([A-Z_]+):", dry, flags=re.MULTILINE)
@@ -149,52 +149,50 @@ class WorkflowDryRunOnlyTests(unittest.TestCase):
         )
         self.assertIn("TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}", live)
         self.assertIn("TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}", live)
-        self.assertIn('entry_monitor.py scan --root "$GITHUB_WORKSPACE" --send', live)
+        self.assertIn('ai_crypto_monitor.candidate_monitor --root "$GITHUB_WORKSPACE" --send', live)
         self.assertEqual(1, text.count("--send"))
         for name in ("wait", "next-tick"):
             self.assertNotIn("secrets.", jobs()[name], name)
 
     def test_every_scanner_call_is_a_scan_in_dry_run_or_live_mode(self) -> None:
-        calls = [line.strip() for line in active_lines() if "entry_monitor.py" in line]
+        self.assertFalse(any("entry_monitor.py" in line for line in active_lines()))
+        calls = [line.strip() for line in active_lines() if "ai_crypto_monitor.candidate_monitor" in line]
         self.assertEqual(
             [
-                'run: python ai_crypto_monitor/entry_monitor.py scan --root "$GITHUB_WORKSPACE" --dry-run',
-                'run: python ai_crypto_monitor/entry_monitor.py scan --root "$GITHUB_WORKSPACE" --send',
+                'run: python -m ai_crypto_monitor.candidate_monitor --root "$GITHUB_WORKSPACE" --dry-run',
+                'run: python -m ai_crypto_monitor.candidate_monitor --root "$GITHUB_WORKSPACE" --send',
             ],
             calls,
         )
 
     def test_dedup_state_is_restored_and_saved_only_on_the_live_path(self) -> None:
         steps = monitor_steps()
-        restore, save = steps["Restore persistent dedup state"], steps["Save dedup state after Telegram accepted an alert"]
+        restore, save = steps["Restore persistent dedup state"], steps["Save candidate dedup and paper state"]
         self.assertIn("uses: actions/cache/restore@v4", restore)
-        self.assertIn("restore-keys: |\n            ai-crypto-dedup-${{ github.ref_name }}-", restore)
-        self.assertIn("if: ${{ always() && steps.live.outputs.alert_sent == 'true' }}", save)
+        self.assertIn("restore-keys: |\n            ai-crypto-candidates-dedup-${{ github.ref_name }}-", restore)
+        self.assertIn("always() && steps.live.outcome != 'skipped'", save)
         self.assertIn("uses: actions/cache/save@v4", save)
         for body in (restore, save):
-            self.assertIn("path: ai_crypto_monitor/state/dedup.json", body)
-            self.assertIn("key: ai-crypto-dedup-${{ github.ref_name }}-${{ github.run_id }}", body)
+            self.assertIn("path: ai_crypto_monitor/state/candidate-dedup.json", body)
+            self.assertIn("key: ai-crypto-candidates-dedup-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}", body)
         self.assertIn("id: live\n", steps[LIVE_STEP])
 
-    def test_outcome_state_has_live_only_cache_artifact_recovery_and_backup(self) -> None:
+    def test_candidate_journal_has_separate_live_cache_and_dry_run_artifacts(self) -> None:
         steps = monitor_steps()
-        restore = steps["Restore persistent outcome state"]
-        recover = steps["Recover outcome state from artifact backup"]
-        save = steps["Save persistent outcome state"]
-        upload = steps["Upload outcome state backup"]
-        for body in (restore, recover, save, upload):
-            self.assertIn(LIVE_PATH, body)
+        restore = steps["Restore candidate journal"]
+        save = steps["Save candidate journal"]
+        upload = steps["Upload candidate journal"]
+        self.assertIn(LIVE_PATH, restore)
         self.assertIn("uses: actions/cache/restore@v4", restore)
-        self.assertIn("ai-crypto-outcomes-v1-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}", restore)
-        self.assertIn("ai_crypto_monitor/state/alert-outcomes.json", restore)
-        self.assertIn("steps.outcome-restore.outputs.cache-matched-key == ''", recover)
-        self.assertIn("GITHUB_TOKEN: ${{ github.token }}", recover)
-        self.assertIn("outcome_tracking restore-artifact", recover)
+        self.assertIn("ai-crypto-candidates-journal-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}", restore)
+        self.assertIn("ai_crypto_monitor/state/candidate-journal.csv", restore)
+        self.assertIn("always() && steps.live.outcome != 'skipped'", save)
         self.assertIn("uses: actions/cache/save@v4", save)
         self.assertIn("uses: actions/upload-artifact@v4", upload)
-        self.assertIn("name: open-alert-state", upload)
+        self.assertIn("name: candidate-journal-${{ github.run_id }}-${{ github.run_attempt }}", upload)
+        self.assertIn("path: ai_crypto_monitor/state/candidate-*.csv", upload)
         self.assertIn("retention-days: 30", upload)
-        self.assertNotIn("secrets.", restore + recover + save + upload)
+        self.assertNotIn("secrets.", restore + save + upload)
 
     def test_diagnostics_are_separate_persistent_and_uploaded_for_every_active_run(self) -> None:
         steps = monitor_steps()
