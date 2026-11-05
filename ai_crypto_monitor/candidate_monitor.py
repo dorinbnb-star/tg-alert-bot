@@ -14,6 +14,7 @@ from types import SimpleNamespace
 
 from backtest import v2_swing as swing
 from . import entry_monitor as monitor
+from . import candidate_journal as reporting
 
 SYMBOLS = ("BTC-USDT-SWAP", "ETH-USDT-SWAP")
 H, DAY = swing.H, swing.DAY
@@ -235,6 +236,12 @@ def main(argv=None):
     directory = monitor.state_dir(root)
     state_file = directory / "candidate-dedup.json"
     journal = directory / ("candidate-journal.csv" if args.send else "candidate-dry-run.csv")
+    if args.send:
+        try:
+            reporting.prepare_live(directory, os.getenv("GITHUB_REPOSITORY", ""), os.getenv("GITHUB_TOKEN", ""))
+        except monitor.MonitorError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 2
     if args.send and journal.exists() and not state_file.exists():
         print("ERROR: Jurnalul există, dar starea de deduplicare lipsește. Telegram oprit.", file=sys.stderr)
         return 2
@@ -252,6 +259,15 @@ def main(argv=None):
                     monitor.require_delivery_identity(root, token, chat_id, config)
                     verified = True
                 monitor.telegram_call(token, "sendMessage", {"chat_id": chat_id, "text": message})
+
+            def document_sender(path, caption):
+                nonlocal verified
+                if not verified:
+                    monitor.require_delivery_identity(root, token, chat_id, config)
+                    verified = True
+                reporting.send_document(token, chat_id, path, caption)
+
+            reporting.notify_reset(directory, sender)
 
             if not state_file.exists():
                 monitor.write_json(state_file, state)
@@ -291,6 +307,9 @@ def main(argv=None):
                 monitor.symbol_scan_error(symbol, str(exc))
         for error in errors:
             print(f"ERROR: {error}", file=sys.stderr)
+        write_journal(journal, state)
+        if args.send:
+            reporting.weekly_delivery(directory, now, document_sender)
         return 2 if errors else 0
     except monitor.MonitorError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
