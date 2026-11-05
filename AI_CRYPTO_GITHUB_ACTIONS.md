@@ -128,3 +128,65 @@ Poarta de fereastra din `scheduler/cadence.py` ramane activa in toate cazurile, 
 `diagnostics/scan_gap_audit.py` citeste istoricul rularilor de pe `main` prin API-ul GitHub si ia ca moment al scanarii finalizarea reusita a pasului `Dry-run scan`. Rularile cu pasul sarit de poarta de timp sau esuat nu sunt numarate. Pentru ziua locala aleasa, auditul masoara pauzele din fereastra `08:00-22:00 Europe/Brussels`, inclusiv de la `08:00` la prima scanare si de la ultima scanare pana la `22:00` (sau pana la momentul auditului). Verdictul este `FAIL` daca o pauza depaseste 15 minute sau daca exista o scanare in afara ferestrei.
 
 Workflow-ul `.github/workflows/scan-gap-audit.yml` ruleaza auditul manual (cu data optionala) si zilnic la 21:17 UTC. Are numai permisiuni de citire si foloseste tokenul efemer `github.token`, nu secrete. Un `FAIL` face rularea rosie. Local: `python diagnostics/scan_gap_audit.py --date 2026-09-28`.
+
+
+## Raport săptămânal și protecția jurnalului (2026-11-05)
+
+La prima scanare live de duminică, de la 20:00 Europe/Brussels inclusiv,
+botul trimite un singur `sendDocument`: CSV-ul complet `candidate-journal.csv`,
+cu raportul în română drept caption. Calendarul local tratează automat DST.
+Fereastra raportată este [duminica precedentă 20:00, duminica curentă 20:00).
+Nu se trimite luni o săptămână restantă dacă toate scanările de duminică seara
+au lipsit. Cadența și intervalul live 08:00–22:00 nu se modifică.
+
+Numărătorile provin exclusiv din jurnal: `SENT` după data confirmării,
+`MISSED_STALE` separat, iar rezultatele `PAPER` după data închiderii.
+Paper include și candidații `MISSED_STALE`, cum îi urmărește deja monitorul;
+R total este suma coloanei `R paper`, fără costuri de execuție.
+Eticheta „ratați noaptea” reproduce cerința mesajului, dar `MISSED_STALE`
+poate include și întârzieri din alte cauze. Candidații deschiși sunt cei
+creați înainte de limita raportului, fără rezultat înaintea aceleiași limite.
+O săptămână cu jurnal gol produce raportul cu zerouri. Dacă există poziții
+paper vechi, rezultatele și pozițiile lor deschise sunt raportate chiar dacă
+nu s-au trimis candidați noi în săptămână.
+
+`candidate-report-state.json` păstrează săptămânile acceptate de Telegram și
+starea notificării de reset. Are cache persistent separat, cu cheie nouă
+run-id/attempt, și este inclus în artifact alături de dedup și CSV.
+Marca săptămânii se scrie numai după acceptarea documentului. Un eșec explicit
+permite reîncercarea la următorul tic de duminică. Ca la alertele existente,
+acceptarea de Telegram și salvarea în GitHub nu sunt o tranzacție atomică:
+un timeout ambiguu sau o întrerupere după acceptare poate permite un duplicat.
+
+Dacă lipsesc ambele fișiere live (`candidate-dedup.json` și CSV-ul), monitorul
+caută cel mai recent artifact `candidate-journal-*` neexpirat de pe `main`.
+Artifactele vechi care conțin exclusiv `candidate-dry-run.csv` sunt ignorate.
+Un backup complet este validat (schema, cheile candidaților și concordanța
+CSV/dedup), apoi recuperat cu mesajul de log `RECOVERED_FROM_ARTIFACT`.
+Starea raportării recuperată păstrează și săptămânile deja prezente în cache.
+Backupurile noi au retenție 30 zile. Artifactele de preview au prefix separat
+`candidate-preview-*` și nu sunt folosite pentru recuperarea live.
+
+Dacă recuperarea nu este posibilă, se scrie stare goală, se loghează
+`JOURNAL_RESET` și se trimite o singură notificare acceptată de Telegram:
+„⚠️ Jurnalul automat a fost resetat (memoria GitHub pierdută).”
+O notificare refuzată rămâne pending pentru următorul tic. Nu se repetă
+notificarea la ticurile următoare după acceptare și salvare.
+**Jurnal fără dedup în cache sau într-un artifact vechi numai cu CSV:
+Telegram rămâne oprit.** Nu reconstruim cheile de pivot din prețurile rotunjite
+ale CSV-ului. Pentru backupurile vechi, protecția poate necesita recuperarea
+manuală a dedup-ului înainte de reluarea live.
+
+Doar pasul live primește cele două secrete Telegram și tokenul efemer GitHub
+pentru recuperare. Permisiunea existentă `actions: read` a jobului monitor
+este suficientă; nu se adaugă permisiuni. Dry-run-ul nu primește secrete,
+nu recuperează/modifică starea live și nu trimite mesaje sau documente.
+Detectarea candidaților și formatul CANDIDAT sunt neschimbate.
+
+Preview local, fără rețea și fără secrete (data este simulată):
+
+```powershell
+python -X utf8 -B -m ai_crypto_monitor.candidate_journal --journal candidate-journal.csv --as-of 2026-11-08T20:07:00+01:00
+```
+
+PR-ul trebuie verificat de Claude înainte de orice merge. Acest task nu face merge.

@@ -190,7 +190,9 @@ class WorkflowDryRunOnlyTests(unittest.TestCase):
         self.assertIn("uses: actions/cache/save@v4", save)
         self.assertIn("uses: actions/upload-artifact@v4", upload)
         self.assertIn("name: candidate-journal-${{ github.run_id }}-${{ github.run_attempt }}", upload)
-        self.assertIn("path: ai_crypto_monitor/state/candidate-*.csv", upload)
+        self.assertIn("ai_crypto_monitor/state/candidate-*.csv", upload)
+        self.assertIn("ai_crypto_monitor/state/candidate-dedup.json", upload)
+        self.assertIn("ai_crypto_monitor/state/candidate-report-state.json", upload)
         self.assertIn("retention-days: 30", upload)
         self.assertNotIn("secrets.", restore + save + upload)
 
