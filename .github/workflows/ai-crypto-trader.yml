@@ -1,7 +1,7 @@
 name: AI Crypto Trader Entry Monitor
 
 # Live alerts only on main ticks started by `schedule` or by the chain itself (github-actions[bot]); only that
-# "Live scan" reads TELEGRAM_TOKEN/TELEGRAM_CHAT_ID and sends only confirmed entries or tracked results.
+# "Live scan" reads TELEGRAM_TOKEN/TELEGRAM_CHAT_ID and sends only BTC/ETH candidates or paper results.
 # Manual workflow_dispatch runs, re-runs and other branches take the "Dry-run scan" step and never see secrets.
 # Cadence: each tick is delayed by an Environment wait timer on its `wait` job (no runner is held while waiting),
 # scans inside 08:00-22:00 Europe/Brussels and dispatches the next tick with the ephemeral GITHUB_TOKEN.
@@ -109,46 +109,35 @@ jobs:
 
       - name: Dry-run scan (OKX public candles, no Telegram, writes Step Summary)
         id: dry
-        if: ${{ steps.cadence.outputs.active == 'true' && !(github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.triggering_actor == 'github-actions[bot]')) }}
+        if: ${{ steps.cadence.outputs.active == 'true' && !(github.ref == 'refs/heads/main' && github.run_attempt == 1 && (github.event_name == 'schedule' || github.triggering_actor == 'github-actions[bot]')) }}
         env:
           SCAN_DIAGNOSTICS_FILE: ${{ github.workspace }}/ai_crypto_monitor/state/scan-diagnostics.jsonl
           SCAN_DIAGNOSTICS_CURRENT: ${{ github.workspace }}/ai_crypto_monitor/state/current-scan-diagnostic.jsonl
           SCAN_DIAGNOSTICS_META: ${{ github.workspace }}/ai_crypto_monitor/state/scan-diagnostics-meta.json
           SCAN_DIAGNOSTICS_SYMBOL: BTC-USDT-SWAP
-        run: python ai_crypto_monitor/entry_monitor.py scan --root "$GITHUB_WORKSPACE" --dry-run
+        run: python -m ai_crypto_monitor.candidate_monitor --root "$GITHUB_WORKSPACE" --dry-run
 
       - name: Restore persistent dedup state
-        if: ${{ steps.cadence.outputs.active == 'true' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.triggering_actor == 'github-actions[bot]') }}
+        if: ${{ steps.cadence.outputs.active == 'true' && github.ref == 'refs/heads/main' && github.run_attempt == 1 && (github.event_name == 'schedule' || github.triggering_actor == 'github-actions[bot]') }}
         uses: actions/cache/restore@v4
         with:
-          path: ai_crypto_monitor/state/dedup.json
-          key: ai-crypto-dedup-${{ github.ref_name }}-${{ github.run_id }}
+          path: ai_crypto_monitor/state/candidate-dedup.json
+          key: ai-crypto-candidates-dedup-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            ai-crypto-dedup-${{ github.ref_name }}-
+            ai-crypto-candidates-dedup-${{ github.ref_name }}-
 
-      - name: Restore persistent outcome state
-        id: outcome-restore
-        if: ${{ steps.cadence.outputs.active == 'true' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.triggering_actor == 'github-actions[bot]') }}
+      - name: Restore candidate journal
+        if: ${{ steps.cadence.outputs.active == 'true' && github.ref == 'refs/heads/main' && github.run_attempt == 1 && (github.event_name == 'schedule' || github.triggering_actor == 'github-actions[bot]') }}
         uses: actions/cache/restore@v4
         with:
-          path: ai_crypto_monitor/state/alert-outcomes.json
-          key: ai-crypto-outcomes-v1-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ai_crypto_monitor/state/candidate-journal.csv
+          key: ai-crypto-candidates-journal-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            ai-crypto-outcomes-v1-${{ github.ref_name }}-
+            ai-crypto-candidates-journal-${{ github.ref_name }}-
 
-      - name: Recover outcome state from artifact backup
-        if: ${{ steps.cadence.outputs.active == 'true' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.triggering_actor == 'github-actions[bot]') && steps.outcome-restore.outputs.cache-matched-key == '' }}
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: >-
-          python -m ai_crypto_monitor.outcome_tracking restore-artifact
-          --state "$GITHUB_WORKSPACE/ai_crypto_monitor/state/alert-outcomes.json"
-          --repository "$GITHUB_REPOSITORY"
-          --branch "$GITHUB_REF_NAME"
-
-      - name: Live scan (OKX public candles, Telegram only on confirmed entry or result, writes Step Summary)
+      - name: Live scan (OKX public candles, BTC/ETH candidates and paper results)
         id: live
-        if: ${{ steps.cadence.outputs.active == 'true' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.triggering_actor == 'github-actions[bot]') }}
+        if: ${{ steps.cadence.outputs.active == 'true' && github.ref == 'refs/heads/main' && github.run_attempt == 1 && (github.event_name == 'schedule' || github.triggering_actor == 'github-actions[bot]') }}
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -156,28 +145,28 @@ jobs:
           SCAN_DIAGNOSTICS_CURRENT: ${{ github.workspace }}/ai_crypto_monitor/state/current-scan-diagnostic.jsonl
           SCAN_DIAGNOSTICS_META: ${{ github.workspace }}/ai_crypto_monitor/state/scan-diagnostics-meta.json
           SCAN_DIAGNOSTICS_SYMBOL: BTC-USDT-SWAP
-        run: python ai_crypto_monitor/entry_monitor.py scan --root "$GITHUB_WORKSPACE" --send
+        run: python -m ai_crypto_monitor.candidate_monitor --root "$GITHUB_WORKSPACE" --send
 
-      - name: Save dedup state after Telegram accepted an alert
-        if: ${{ always() && steps.live.outputs.alert_sent == 'true' }}
+      - name: Save candidate dedup and paper state
+        if: ${{ always() && steps.live.outcome != 'skipped' && steps.live.outcome != '' && hashFiles('ai_crypto_monitor/state/candidate-dedup.json') != '' }}
         uses: actions/cache/save@v4
         with:
-          path: ai_crypto_monitor/state/dedup.json
-          key: ai-crypto-dedup-${{ github.ref_name }}-${{ github.run_id }}
+          path: ai_crypto_monitor/state/candidate-dedup.json
+          key: ai-crypto-candidates-dedup-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
 
-      - name: Save persistent outcome state
-        if: ${{ always() && steps.cadence.outputs.active == 'true' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.triggering_actor == 'github-actions[bot]') && hashFiles('ai_crypto_monitor/state/alert-outcomes.json') != '' }}
+      - name: Save candidate journal
+        if: ${{ always() && steps.live.outcome != 'skipped' && steps.live.outcome != '' && hashFiles('ai_crypto_monitor/state/candidate-journal.csv') != '' }}
         uses: actions/cache/save@v4
         with:
-          path: ai_crypto_monitor/state/alert-outcomes.json
-          key: ai-crypto-outcomes-v1-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ai_crypto_monitor/state/candidate-journal.csv
+          key: ai-crypto-candidates-journal-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
 
-      - name: Upload outcome state backup
-        if: ${{ always() && steps.cadence.outputs.active == 'true' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.triggering_actor == 'github-actions[bot]') && hashFiles('ai_crypto_monitor/state/alert-outcomes.json') != '' }}
+      - name: Upload candidate journal
+        if: ${{ always() && steps.cadence.outputs.active == 'true' && hashFiles('ai_crypto_monitor/state/candidate-*.csv') != '' }}
         uses: actions/upload-artifact@v4
         with:
-          name: open-alert-state
-          path: ai_crypto_monitor/state/alert-outcomes.json
+          name: candidate-journal-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ai_crypto_monitor/state/candidate-*.csv
           if-no-files-found: error
           retention-days: 30
 
