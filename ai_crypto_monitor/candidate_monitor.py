@@ -6,6 +6,7 @@ import csv
 from dataclasses import asdict, dataclass
 from datetime import datetime
 import json
+import math
 import os
 from pathlib import Path
 import sys
@@ -63,19 +64,41 @@ class Candidate:
         return None if self.structural is None else abs(self.structural - self.entry) / self.risk
 
 
-def candidate_message(c):
-    rr = "indisponibil" if c.rr is None else f"{c.rr:.2f}"
+def candidate_message(c, verified_price=None):
+    rr = abs(c.tp - c.entry) / c.risk
     return "\n".join((
-        f"🔔 CANDIDAT {c.coin} {c.direction} — nevalidat",
-        f"Nivel-cheie (pivot 4H): {c.price(c.level)}",
-        f"Sweep: {c.price(c.sweep)} la {monitor.local_hm(c.sweep_ms)} | Confirmare 1H: {monitor.local_hm(c.confirmation_ms)}",
-        f"Intrare de referință: {c.price(c.entry)} (close-ul confirmării)",
-        f"SL: {c.price(c.stop)} (maximul dintre SL structural și 1,5×ATR14 1H)",
-        f"TP 2R: {c.price(c.tp)}",
-        f"TP structural (primul pivot 4H opus): {c.price(c.structural)} (R:R {rr})",
-        f"Trend Daily: {c.daily}",
-        "Decizia e a ta. Notează în jurnal: intrat / refuzat + motiv.",
+        f"{'🟢' if c.sign > 0 else '🔴'} {c.coin} {c.direction}",
+        "",
+        f"Entry teoretic: {c.price(c.entry)}",
+        f"Preț verificat: {c.price(verified_price)}",
+        f"SL: {c.price(c.stop)}",
+        f"TP: {c.price(c.tp)}",
+        f"R:R: {rr:.2f}",
+        f"Valabil până la: {monitor.local_hm(c.confirmation_ms + 2 * H)}",
+        "Status: PENDING",
     ))
+
+
+def paper_message(c, result):
+    _, outcome, r = result
+    magnitude = f"{abs(r):.2f}"
+    if outcome == "SL ATINS":
+        magnitude = magnitude.rstrip("0").rstrip(".")
+    value = f"{'−' if r < 0 else '+'}{magnitude}R"
+    icon, label = {"2R ATINS": ("✅", "TP HIT"), "SL ATINS": ("❌", "SL HIT"),
+                   "TIMEOUT": ("⏱", "ÎNCHIS LA TIMEOUT")}[outcome]
+    return f"{icon} {c.coin} {c.direction}: {label} ({value})"
+
+
+def display_price(symbol, reader):
+    if reader is None:
+        return None
+    try:
+        value = float(reader(symbol))
+        return value if math.isfinite(value) and value > 0 else None
+    except (monitor.MonitorError, TypeError, ValueError):
+        # Display-only lookup must not change candidate eligibility or paper state.
+        return None
 
 
 def detect(symbol, h1, h4, daily, tick, start, now):
@@ -161,7 +184,7 @@ def write_journal(path, state):
     temporary.replace(path)
 
 
-def update(symbol, candidates, candles, now, state, persist, sender=None, historical=False):
+def update(symbol, candidates, candles, now, state, persist, sender=None, historical=False, price_reader=None):
     messages = []
     for candidate in candidates:
         if candidate.key in state:
@@ -169,7 +192,7 @@ def update(symbol, candidates, candles, now, state, persist, sender=None, histor
         if not historical and now - candidate.confirmation_ms > 2 * H:
             status = "MISSED_STALE"
         else:
-            message = candidate_message(candidate)
+            message = candidate_message(candidate, display_price(candidate.symbol, price_reader))
             if sender is not None:
                 sender(message)
             messages.append(message)
@@ -184,7 +207,7 @@ def update(symbol, candidates, candles, now, state, persist, sender=None, histor
         if result is None:
             continue
         if item["status"] == "SENT" and sender is not None:
-            sender(f"📊 CANDIDAT {candidate.coin} {candidate.direction}: {result[1]} (paper)")
+            sender(paper_message(candidate, result))
         item["result"] = result
         persist()
     return messages
@@ -295,7 +318,8 @@ def main(argv=None):
                     for candidate in found:
                         print(f"\n{monitor.utc_iso(candidate.confirmation_ms)} | {candidate.symbol}")
                         print(candidate_message(candidate))
-                update(symbol, found, h1, now, state, persist, sender, args.historical)
+                update(symbol, found, h1, now, state, persist, sender, args.historical,
+                       price_reader=None if args.historical else client.last_price)
                 current = [item for item in state.values() if item["candidate"]["symbol"] == symbol]
                 stale = sum(item["status"] == "MISSED_STALE" for item in current)
                 monitor.append_diagnostic({"candidates": len(found), "MISSED_STALE": stale}, "CANDIDATE_SCAN", symbol)

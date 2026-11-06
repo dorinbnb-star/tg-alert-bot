@@ -24,16 +24,15 @@ def bar(index, high=105, low=100, close=103):
 class CandidateTests(unittest.TestCase):
     def test_exact_message(self):
         self.assertEqual(
-            "🔔 CANDIDAT ETH LONG — nevalidat\n"
-            "Nivel-cheie (pivot 4H): 100.00\n"
-            "Sweep: 99.00 la 21:00 | Confirmare 1H: 23:00\n"
-            "Intrare de referință: 102.00 (close-ul confirmării)\n"
-            "SL: 98.00 (maximul dintre SL structural și 1,5×ATR14 1H)\n"
-            "TP 2R: 110.00\n"
-            "TP structural (primul pivot 4H opus): 114.00 (R:R 3.00)\n"
-            "Trend Daily: preț 101.00 < EMA50 / < EMA200\n"
-            "Decizia e a ta. Notează în jurnal: intrat / refuzat + motiv.",
-            cm.candidate_message(C),
+            "🟢 ETH LONG\n\n"
+            "Entry teoretic: 102.00\n"
+            "Preț verificat: 101.23\n"
+            "SL: 98.00\n"
+            "TP: 110.00\n"
+            "R:R: 2.00\n"
+            "Valabil până la: 01:00\n"
+            "Status: PENDING",
+            cm.candidate_message(C, 101.23),
         )
 
     def test_persistent_pivot_and_paper_are_each_sent_once(self):
@@ -52,7 +51,7 @@ class CandidateTests(unittest.TestCase):
             cm.update(SYMBOL, [duplicate], candles, 23 * H, state, persist, sent.append)
             state = json.loads(state_path.read_text(encoding="utf-8"))
             cm.update(SYMBOL, [C], candles, 24 * H, state, persist, sent.append)
-            self.assertEqual([cm.candidate_message(C), "📊 CANDIDAT ETH LONG: 2R ATINS (paper)"], sent)
+            self.assertEqual([cm.candidate_message(C), "✅ ETH LONG: TP HIT (+2.00R)"], sent)
             journal = root / "journal.csv"
             cm.write_journal(journal, state)
             with journal.open(encoding="utf-8") as handle:
